@@ -1,0 +1,7 @@
+README.md
+pyproject.toml
+castillo_telegram_bot.egg-info/PKG-INFO
+castillo_telegram_bot.egg-info/SOURCES.txt
+castillo_telegram_bot.egg-info/dependency_links.txt
+castillo_telegram_bot.egg-info/requires.txt
+castillo_telegram_bot.egg-info/top_level.txt
