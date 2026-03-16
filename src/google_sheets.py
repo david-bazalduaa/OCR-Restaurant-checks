@@ -65,41 +65,23 @@ class GoogleSheetsRepository:
             q=query,
             fields="files(id, name)",
             pageSize=10,
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True,
         ).execute()
 
         files = response.get("files", [])
         return files[0] if files else None
 
-    def create_month_spreadsheet(self, ticket_date: date) -> dict[str, Any]:
-        month_name = self.month_name_from_date(ticket_date)
-
-        created = self.sheets.spreadsheets().create(
-            body={"properties": {"title": month_name}}
-        ).execute()
-
-        spreadsheet_id = created["spreadsheetId"]
-
-        current_meta = self.drive.files().get(
-            fileId=spreadsheet_id,
-            fields="parents",
-        ).execute()
-
-        previous_parents = ",".join(current_meta.get("parents", []))
-
-        self.drive.files().update(
-            fileId=spreadsheet_id,
-            addParents=self.year_folder_id,
-            removeParents=previous_parents,
-            fields="id, parents",
-        ).execute()
-
-        return {"id": spreadsheet_id, "name": month_name}
-
-    def get_or_create_month_spreadsheet(self, ticket_date: date) -> dict[str, Any]:
+    def get_month_spreadsheet(self, ticket_date: date) -> dict[str, Any]:
         existing = self.find_month_spreadsheet(ticket_date)
         if existing:
             return existing
-        return self.create_month_spreadsheet(ticket_date)
+
+        month_name = self.month_name_from_date(ticket_date)
+        raise ValueError(
+            f"No encontré el archivo mensual '{month_name}' dentro de la carpeta configurada. "
+            f"Créalo manualmente dentro de la carpeta del año y compártelo con la service account."
+        )
 
     def get_spreadsheet_metadata(self, spreadsheet_id: str) -> dict[str, Any]:
         return self.sheets.spreadsheets().get(
@@ -154,7 +136,7 @@ class GoogleSheetsRepository:
     ) -> dict[str, str]:
         response = self.sheets.spreadsheets().values().get(
             spreadsheetId=spreadsheet_id,
-            range=f"{config_sheet_name}!A2:C100",
+            range=f"{config_sheet_name}!A2:C200",
         ).execute()
 
         rows = response.get("values", [])
@@ -195,8 +177,184 @@ class GoogleSheetsRepository:
             f"No encontré filas vacías en {sheet_name}!{column}{start_row}:{column}{end_row}"
         )
 
+    def get_next_folio(
+        self,
+        spreadsheet_id: str,
+        sheet_name: str,
+        start_row: int,
+        end_row: int,
+    ) -> int:
+        response = self.sheets.spreadsheets().values().get(
+            spreadsheetId=spreadsheet_id,
+            range=f"{sheet_name}!A{start_row}:A{end_row}",
+        ).execute()
+
+        rows = response.get("values", [])
+        max_folio = 0
+
+        for row in rows:
+            if not row:
+                continue
+            raw_value = str(row[0]).strip()
+            if raw_value.isdigit():
+                max_folio = max(max_folio, int(raw_value))
+
+        return max_folio + 1
+
+    def write_tarjeta(
+        self,
+        spreadsheet_id: str,
+        sheet_name: str,
+        personas: int | str,
+        mesa: str,
+        mesero: str,
+        importe: float | str,
+        propina: float | str | None,
+        responsable: str,
+        tarjeta: str,
+        numero: str,
+        start_row: int,
+        end_row: int,
+    ) -> dict[str, Any]:
+        row = self.next_empty_row(
+            spreadsheet_id=spreadsheet_id,
+            sheet_name=sheet_name,
+            column="A",
+            start_row=start_row,
+            end_row=end_row,
+        )
+
+        folio = self.get_next_folio(
+            spreadsheet_id=spreadsheet_id,
+            sheet_name=sheet_name,
+            start_row=start_row,
+            end_row=end_row,
+        )
+
+        values = [[
+            folio,
+            personas,
+            mesa,
+            mesero,
+            importe,
+            "" if propina is None else propina,
+            responsable,
+            tarjeta,
+            numero,
+        ]]
+
+        self.sheets.spreadsheets().values().update(
+            spreadsheetId=spreadsheet_id,
+            range=f"{sheet_name}!A{row}:I{row}",
+            valueInputOption="USER_ENTERED",
+            body={"values": values},
+        ).execute()
+
+        return {
+            "folio": folio,
+            "row": row,
+            "table": "ingreso_tarjeta",
+        }
+
+    def write_propina_tarjeta_efectivo(
+        self,
+        spreadsheet_id: str,
+        sheet_name: str,
+        folio: int,
+        propina: float | str,
+        start_row: int,
+        end_row: int,
+    ) -> dict[str, Any]:
+        row = self.next_empty_row(
+            spreadsheet_id=spreadsheet_id,
+            sheet_name=sheet_name,
+            column="L",
+            start_row=start_row,
+            end_row=end_row,
+        )
+
+        values = [[folio, propina]]
+
+        self.sheets.spreadsheets().values().update(
+            spreadsheetId=spreadsheet_id,
+            range=f"{sheet_name}!L{row}:M{row}",
+            valueInputOption="USER_ENTERED",
+            body={"values": values},
+        ).execute()
+
+        return {
+            "folio": folio,
+            "row": row,
+            "table": "propina_tarjeta_efectivo",
+        }
+
+    def write_efectivo(
+        self,
+        spreadsheet_id: str,
+        sheet_name: str,
+        personas: int | str,
+        mesa: str,
+        mesero: str,
+        importe: float | str,
+        propina: float | str | None,
+        responsable: str,
+        start_row: int,
+        end_row: int,
+    ) -> dict[str, Any]:
+        row = self.next_empty_row(
+            spreadsheet_id=spreadsheet_id,
+            sheet_name=sheet_name,
+            column="A",
+            start_row=start_row,
+            end_row=end_row,
+        )
+
+        folio = self.get_next_folio(
+            spreadsheet_id=spreadsheet_id,
+            sheet_name=sheet_name,
+            start_row=start_row,
+            end_row=end_row,
+        )
+
+        values = [[
+            folio,
+            personas,
+            mesa,
+            mesero,
+            importe,
+            "" if propina is None else propina,
+            responsable,
+        ]]
+
+        self.sheets.spreadsheets().values().update(
+            spreadsheetId=spreadsheet_id,
+            range=f"{sheet_name}!A{row}:G{row}",
+            valueInputOption="USER_ENTERED",
+            body={"values": values},
+        ).execute()
+
+        return {
+            "folio": folio,
+            "row": row,
+            "table": "ingreso_efectivo",
+        }
+
+    def append_log(
+        self,
+        spreadsheet_id: str,
+        log_data: list[Any],
+        log_sheet_name: str = "LOG",
+    ) -> None:
+        self.sheets.spreadsheets().values().append(
+            spreadsheetId=spreadsheet_id,
+            range=f"{log_sheet_name}!A:AA",
+            valueInputOption="USER_ENTERED",
+            insertDataOption="INSERT_ROWS",
+            body={"values": [log_data]},
+        ).execute()
+
     def healthcheck_for_date(self, ticket_date: date) -> dict[str, Any]:
-        spreadsheet = self.get_or_create_month_spreadsheet(ticket_date)
+        spreadsheet = self.get_month_spreadsheet(ticket_date)
         spreadsheet_id = spreadsheet["id"]
         day_sheet_name = self.day_sheet_name_from_date(ticket_date)
 

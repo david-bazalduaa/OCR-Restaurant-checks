@@ -1,0 +1,11 @@
+Metadata-Version: 2.4
+Name: castillo-telegram-bot
+Version: 0.1.0
+Summary: Telegram OCR bot para registrar tickets del restaurante en Google Sheets
+Requires-Python: >=3.11
+Requires-Dist: modal
+Requires-Dist: fastapi
+Requires-Dist: httpx
+Requires-Dist: pydantic>=2
+Requires-Dist: google-api-python-client
+Requires-Dist: google-auth
