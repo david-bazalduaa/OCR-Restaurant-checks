@@ -8,7 +8,6 @@ dependencies = [
     "fastapi",
     "httpx",
     "pydantic>=2",
+    "google-api-python-client",
+    "google-auth",
 ]
-
-[tool.setuptools]
-py-modules = []
