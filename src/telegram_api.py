@@ -22,8 +22,12 @@ def send_message(chat_id: str | int, text: str, reply_to_message_id: int | None 
     }
     if reply_to_message_id:
         payload["reply_to_message_id"] = reply_to_message_id
-    return telegram_post("sendMessage", payload)
 
+    try:
+        return telegram_post("sendMessage", payload)
+    except Exception as e:
+        print(f"send_message failed: {e}")
+        return {"ok": False, "error": str(e)}
 
 def get_file_path(file_id: str) -> str:
     resp = requests.get(

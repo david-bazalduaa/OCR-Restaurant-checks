@@ -421,8 +421,8 @@ def build_log_payload(
     tip_mode_final: str = "",
     record_id: str | None = None,
 ) -> dict:
-    ticket_date = parsed["ticket_date"]
-    ticket_dt = date.fromisoformat(ticket_date)
+    raw_ticket_date = parsed.get("ticket_date") or local_now().date().isoformat()
+    ticket_dt = date.fromisoformat(raw_ticket_date)
 
     importe = parsed.get("importe") or 0.0
     total_cobrado = importe + (tip_in_card or 0.0) + (tip_in_cash or 0.0)
@@ -430,7 +430,7 @@ def build_log_payload(
     return {
         "record_id": record_id or uuid.uuid4().hex[:12],
         "created_at": local_now().isoformat(),
-        "ticket_date": ticket_date,
+        "ticket_date": raw_ticket_date,
         "year": ticket_dt.year,
         "month_name": month_name_es(ticket_dt),
         "day_sheet": str(ticket_dt.day),
@@ -456,7 +456,6 @@ def build_log_payload(
         "ocr_raw_text": parsed.get("ocr_raw_text", ""),
         "status": status,
     }
-
 
 def is_duplicate(log_ws: gspread.Worksheet, config: dict, parsed: dict) -> bool:
     key_fields_raw = config.get("duplicate_key_fields", "ticket_date|mesa|importe|card_last4")

@@ -114,6 +114,7 @@ def process_ticket_message(chat_id: str, reply_to_message_id: int | None, file_i
         return
 
     ticket_date = parsed_ticket_date_or_today(parsed)
+    parsed["ticket_date"] = ticket_date.isoformat()
     ctx = get_runtime(ticket_date)
     responsable = ctx.config.get("responsable_default", "")
 
@@ -459,30 +460,43 @@ def build_failed_log_payload(chat_id: str, file_id: str, parsed: dict | None = N
         status="OCR_FAILED",
     )
 
-@app.function(image=image, timeout=120)
+import traceback
+
+modal_secrets = [
+    modal.Secret.from_name("castillo-bot-secrets")
+]
+@app.function(image=image, timeout=120, secrets=modal_secrets)
 @modal.web_endpoint(method="POST")
 def telegram_webhook(update: dict):
-    message = update.get("message") or update.get("edited_message")
-    if not message:
+    try:
+        message = update.get("message") or update.get("edited_message")
+        if not message:
+            return {"ok": True}
+
+        chat_id = str(message["chat"]["id"])
+        reply_to_message_id = message.get("message_id")
+
+        file_id = extract_best_file_id(message)
+        if file_id:
+            process_ticket_message(chat_id, reply_to_message_id, file_id)
+            return {"ok": True}
+
+        text = (message.get("text") or "").strip()
+        if text:
+            if text.startswith("/start"):
+                send_message(
+                    chat_id,
+                    "Hola 👋 Mándame una foto del ticket y yo lo intento pasar a la hoja del día.",
+                    reply_to_message_id,
+                )
+            else:
+                process_tip_reply(chat_id, reply_to_message_id, text)
+
         return {"ok": True}
 
-    chat_id = str(message["chat"]["id"])
-    reply_to_message_id = message.get("message_id")
-
-    file_id = extract_best_file_id(message)
-    if file_id:
-        process_ticket_message(chat_id, reply_to_message_id, file_id)
-        return {"ok": True}
-
-    text = (message.get("text") or "").strip()
-    if text:
-        if text.startswith("/start"):
-            send_message(
-                chat_id,
-                "Hola 👋 Mándame una foto del ticket y yo lo intento pasar a la hoja del día.",
-                reply_to_message_id,
-            )
-        else:
-            process_tip_reply(chat_id, reply_to_message_id, text)
-
-    return {"ok": True}
+    except Exception as e:
+        print("ERROR EN WEBHOOK")
+        print(repr(e))
+        print(traceback.format_exc())
+        print("UPDATE RECIBIDO:", update)
+        return {"ok": True, "error": str(e)}
