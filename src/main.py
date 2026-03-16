@@ -25,11 +25,11 @@ from .settings import settings
 from .telegram_api import download_file_bytes, extract_best_file_id, send_message
 
 app = modal.App("ocr-restaurant-checks")
-
 image = (
     modal.Image.debian_slim(python_version="3.11")
     .apt_install("tesseract-ocr", "tesseract-ocr-spa")
     .pip_install(
+        "fastapi[standard]",
         "gspread",
         "google-api-python-client",
         "google-auth",
