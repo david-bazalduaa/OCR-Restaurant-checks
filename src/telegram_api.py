@@ -8,9 +8,12 @@ from .settings import settings
 BASE_BOT_URL = f"https://api.telegram.org/bot{settings.telegram_bot_token}"
 BASE_FILE_URL = f"https://api.telegram.org/file/bot{settings.telegram_bot_token}"
 
+# Sesión reutilizable — habilita keep-alive TCP y reduce latencia
+_session = requests.Session()
+
 
 def telegram_post(method: str, payload: dict) -> dict:
-    resp = requests.post(f"{BASE_BOT_URL}/{method}", json=payload, timeout=30)
+    resp = _session.post(f"{BASE_BOT_URL}/{method}", json=payload, timeout=30)
     resp.raise_for_status()
     return resp.json()
 
@@ -30,7 +33,7 @@ def send_message(chat_id: str | int, text: str, reply_to_message_id: int | None 
         return {"ok": False, "error": str(e)}
 
 def get_file_path(file_id: str) -> str:
-    resp = requests.get(
+    resp = _session.get(
         f"{BASE_BOT_URL}/getFile",
         params={"file_id": file_id},
         timeout=30,
@@ -44,7 +47,7 @@ def get_file_path(file_id: str) -> str:
 
 def download_file_bytes(file_id: str) -> bytes:
     file_path = get_file_path(file_id)
-    resp = requests.get(f"{BASE_FILE_URL}/{file_path}", timeout=60)
+    resp = _session.get(f"{BASE_FILE_URL}/{file_path}", timeout=60)
     resp.raise_for_status()
     return resp.content
 

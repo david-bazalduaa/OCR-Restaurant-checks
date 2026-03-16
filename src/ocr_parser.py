@@ -125,14 +125,15 @@ def merge_ocr_texts(texts: list[str]) -> str:
 
 
 def run_ocr(image_bytes: bytes) -> tuple[str, float | None]:
+    """2 pasadas: gris PSM6 + binario PSM6 (tickets rectangulares)."""
     gray = preprocess_image(image_bytes, binary=False)
     bw = preprocess_image(image_bytes, binary=True)
 
     texts = []
     confs = []
 
-    for img, psm in [(gray, 6), (gray, 11), (bw, 6), (bw, 11)]:
-        text, conf = _ocr_pass(img, psm)
+    for img in [gray, bw]:
+        text, conf = _ocr_pass(img, 6)
         texts.append(text)
         if conf is not None:
             confs.append(conf)
@@ -159,7 +160,31 @@ def extract_ticket_date(text: str) -> str | None:
         return None
 
 
+def validate_mesa(raw: str | None) -> str | None:
+    """Normaliza la mesa al formato letra+2dígitos (ej: A12, M04)."""
+    if not raw:
+        return None
+    raw = raw.strip().upper()
+    # Ya cumple el formato esperado
+    if re.fullmatch(r"[A-Z]\d{2}", raw):
+        return raw
+    # Letra + 1 dígito → agregar cero (ej: M4 → M04)
+    m = re.fullmatch(r"([A-Z])(\d)", raw)
+    if m:
+        return f"{m.group(1)}0{m.group(2)}"
+    # Solo dígitos con 2+ chars → intentar interpretar como mesa numérica
+    if re.fullmatch(r"\d{2,3}", raw):
+        return raw
+    # Devolver tal cual si no encaja
+    return raw
+
+
 def extract_mesa(text: str) -> str | None:
+    # Prioridad 1: patrón explícito letra+2dígitos cerca de "MESA"
+    m = re.search(r"\bMESA\s*[:#-]?\s*([A-Z]\d{2})\b", text)
+    if m:
+        return m.group(1).strip()
+    # Prioridad 2: patrón general MESA + algo alfanumérico
     patterns = [
         r"\bMESA\s*[:#-]?\s*([A-Z0-9\-]{1,12})\b",
         r"\bMESA\s*#\s*([A-Z0-9\-]{1,12})\b",
@@ -169,12 +194,13 @@ def extract_mesa(text: str) -> str | None:
     for p in patterns:
         m = re.search(p, text)
         if m:
-            return m.group(1).strip()
+            return validate_mesa(m.group(1).strip())
     return None
 
 
 def extract_personas(text: str) -> int | None:
     patterns = [
+        r"#\s*PERS\s*[:#-]?\s*(\d{1,2})\b",
         r"\bPERSONAS?\s*[:#-]?\s*(\d{1,2})\b",
         r"\bPAX\s*[:#-]?\s*(\d{1,2})\b",
         r"\bCOMENSALES?\s*[:#-]?\s*(\d{1,2})\b",

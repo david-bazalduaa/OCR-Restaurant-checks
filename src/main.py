@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+import traceback
 from datetime import date
 
 import modal
@@ -47,50 +49,67 @@ def parsed_ticket_date_or_today(parsed: dict) -> date:
 def fmt_money(v):
     if v in (None, ""):
         return "s/d"
-    return f"${float(v):.2f}"
+    return f"${float(v):,.2f}"
 
 def ticket_summary(parsed: dict) -> str:
-    mesa = parsed.get("mesa") or "s/d"
+    mesa = parsed.get("mesa")
     mesero = parsed.get("mesero") or "s/d"
     personas = parsed.get("personas") or "s/d"
     pago = parsed.get("payment_method") or "desconocido"
+    ticket_date = parsed.get("ticket_date")
 
-    lines = [
-        f"Mesa: {mesa}",
-        f"Mesero: {mesero}",
-        f"Personas: {personas}",
-        f"Importe total: {fmt_money(parsed.get('importe'))}",
-    ]
+    lines = []
+
+    if ticket_date:
+        lines.append(f"📅 Fecha: {ticket_date}")
+
+    if mesa:
+        lines.append(f"🪑 Mesa: {mesa}")
+    else:
+        lines.append("🪑 Mesa: ⚠️ no detectada")
+
+    lines.append(f"👤 Mesero: {mesero}")
+    lines.append(f"👥 Personas: {personas}")
+    lines.append(f"💰 Importe: {fmt_money(parsed.get('importe'))}")
 
     if pago == "tarjeta":
+        card_info = f"{parsed.get('card_code_sheet') or parsed.get('card_network') or ''} {parsed.get('card_last4') or ''}".strip()
         lines.append(
-            f"Tarjeta: {fmt_money(parsed.get('card_amount') or parsed.get('importe'))} "
-            f"{parsed.get('card_code_sheet') or parsed.get('card_network') or ''} "
-            f"{parsed.get('card_last4') or ''}".strip()
+            f"💳 Tarjeta: {fmt_money(parsed.get('card_amount') or parsed.get('importe'))}"
+            + (f" ({card_info})" if card_info else "")
         )
     elif pago == "efectivo":
-        lines.append(f"Efectivo: {fmt_money(parsed.get('cash_amount') or parsed.get('importe'))}")
+        lines.append(f"💵 Efectivo: {fmt_money(parsed.get('cash_amount') or parsed.get('importe'))}")
     elif pago == "mixto":
+        card_info = f"{parsed.get('card_code_sheet') or parsed.get('card_network') or ''} {parsed.get('card_last4') or ''}".strip()
         lines.append(
-            f"Tarjeta: {fmt_money(parsed.get('card_amount'))} "
-            f"{parsed.get('card_code_sheet') or parsed.get('card_network') or ''} "
-            f"{parsed.get('card_last4') or ''}".strip()
+            f"💳 Tarjeta: {fmt_money(parsed.get('card_amount'))}"
+            + (f" ({card_info})" if card_info else "")
         )
-        lines.append(f"Efectivo: {fmt_money(parsed.get('cash_amount'))}")
+        lines.append(f"💵 Efectivo: {fmt_money(parsed.get('cash_amount'))}")
     else:
         lines.append(f"Pago: {pago}")
 
-    if parsed.get("propina") not in (None, ""):
-        lines.append(f"Propina detectada: {fmt_money(parsed.get('propina'))}")
+    if parsed.get("propina") not in (None, "", 0, 0.0):
+        lines.append(f"🎁 Propina: {fmt_money(parsed.get('propina'))}")
 
     return "\n".join(lines)
 
 def process_ticket_message(chat_id: str, reply_to_message_id: int | None, file_id: str) -> None:
+    t0 = time.time()
+
+    # Feedback inmediato para que el usuario sepa que recibimos la foto
+    send_message(chat_id, "⏳ Procesando ticket…", reply_to_message_id)
+
     try:
+        t1 = time.time()
         image_bytes = download_file_bytes(file_id)
+        t2 = time.time()
         parsed = ocr_and_parse(image_bytes)
+        t3 = time.time()
+        print(f"[TIMING] download={t2-t1:.2f}s  ocr={t3-t2:.2f}s")
     except Exception as e:
-        send_message(chat_id, f"No pude descargar o leer la imagen. Error: {e}", reply_to_message_id)
+        send_message(chat_id, f"⚠️ No pude descargar o leer la imagen.\nError: {e}", reply_to_message_id)
         return
 
     has_any_amount = any(
@@ -108,14 +127,20 @@ def process_ticket_message(chat_id: str, reply_to_message_id: int | None, file_i
 
         send_message(
             chat_id,
-            "No pude identificar bien el ticket. Mándame una foto más derecha, completa y con buena luz 🙏",
+            "⚠️ No pude leer este ticket.\n"
+            "Intenta con foto más derecha, completa y con buena luz 📸",
             reply_to_message_id,
         )
         return
 
     ticket_date = parsed_ticket_date_or_today(parsed)
     parsed["ticket_date"] = ticket_date.isoformat()
+
+    t4 = time.time()
     ctx = get_runtime(ticket_date)
+    t5 = time.time()
+    print(f"[TIMING] sheets_init={t5-t4:.2f}s")
+
     responsable = ctx.config.get("responsable_default", "")
 
     parsed["card_code_sheet"] = resolve_card_code_sheet(
@@ -138,7 +163,7 @@ def process_ticket_message(chat_id: str, reply_to_message_id: int | None, file_i
 
         send_message(
             chat_id,
-            "Ojo: este ticket parece duplicado y no lo guardé para no repetirlo 👀",
+            "⚠️ Ticket duplicado — no guardado.\n\n" + ticket_summary(parsed),
             reply_to_message_id,
         )
         return
@@ -169,9 +194,11 @@ def process_ticket_message(chat_id: str, reply_to_message_id: int | None, file_i
             )
             append_log_record(ctx.log_ws, log_payload)
 
+            t6 = time.time()
+            print(f"[TIMING] total={t6-t0:.2f}s")
             send_message(
                 chat_id,
-                "Listo, ticket de tarjeta guardado ✅\n\n" + ticket_summary(write_payload),
+                "✅ Ticket registrado\n\n" + ticket_summary(write_payload),
                 reply_to_message_id,
             )
             return
@@ -194,11 +221,13 @@ def process_ticket_message(chat_id: str, reply_to_message_id: int | None, file_i
         )
         append_log_record(ctx.log_ws, log_payload)
 
+        t6 = time.time()
+        print(f"[TIMING] total={t6-t0:.2f}s")
         send_message(
             chat_id,
-            "Leí ticket con pago con tarjeta, pero no detecté propina.\n\n"
+            "📋 Ticket registrado — falta propina\n\n"
             f"{ticket_summary(write_payload)}\n\n"
-            "Respóndeme solo con la propina. Ejemplo: 80 o $80",
+            "💬 Responde solo el monto de propina (ej: 80)",
             reply_to_message_id,
         )
         return
@@ -225,9 +254,11 @@ def process_ticket_message(chat_id: str, reply_to_message_id: int | None, file_i
             )
             append_log_record(ctx.log_ws, log_payload)
 
+            t6 = time.time()
+            print(f"[TIMING] total={t6-t0:.2f}s")
             send_message(
                 chat_id,
-                "Listo, ticket en efectivo guardado ✅\n\n" + ticket_summary(write_payload),
+                "✅ Ticket registrado\n\n" + ticket_summary(write_payload),
                 reply_to_message_id,
             )
             return
@@ -249,11 +280,13 @@ def process_ticket_message(chat_id: str, reply_to_message_id: int | None, file_i
         )
         append_log_record(ctx.log_ws, log_payload)
 
+        t6 = time.time()
+        print(f"[TIMING] total={t6-t0:.2f}s")
         send_message(
             chat_id,
-            "Leí ticket en efectivo.\n\n"
+            "📋 Ticket registrado — falta propina\n\n"
             f"{ticket_summary(write_payload)}\n\n"
-            "Respóndeme solo con la propina. Ejemplo: 50 o $50",
+            "💬 Responde solo el monto de propina (ej: 50)",
             reply_to_message_id,
         )
         return
@@ -265,7 +298,8 @@ def process_ticket_message(chat_id: str, reply_to_message_id: int | None, file_i
         if card_amount in (None, 0, 0.0) or cash_amount in (None, 0, 0.0):
             send_message(
                 chat_id,
-                "Detecté que parece ticket mixto, pero no pude separar bien cuánto fue tarjeta y cuánto efectivo. Mándame otra foto porfa 🙏",
+                "⚠️ Parece ticket mixto, pero no pude separar tarjeta/efectivo.\n"
+                "Manda otra foto más clara 📸",
                 reply_to_message_id,
             )
             return
@@ -294,9 +328,11 @@ def process_ticket_message(chat_id: str, reply_to_message_id: int | None, file_i
             )
             append_log_record(ctx.log_ws, log_payload)
 
+            t6 = time.time()
+            print(f"[TIMING] total={t6-t0:.2f}s")
             send_message(
                 chat_id,
-                "Listo, ticket mixto guardado ✅\n\n" + ticket_summary(parsed),
+                "✅ Ticket mixto registrado\n\n" + ticket_summary(parsed),
                 reply_to_message_id,
             )
             return
@@ -315,11 +351,13 @@ def process_ticket_message(chat_id: str, reply_to_message_id: int | None, file_i
         )
         append_log_record(ctx.log_ws, log_payload)
 
+        t6 = time.time()
+        print(f"[TIMING] total={t6-t0:.2f}s")
         send_message(
             chat_id,
-            "Leí un ticket mixto.\n\n"
+            "📋 Ticket mixto registrado — falta propina\n\n"
             f"{ticket_summary(parsed)}\n\n"
-            "Respóndeme así:\n"
+            "💬 Responde así:\n"
             "tarjeta 80\n"
             "o\n"
             "efectivo 80",
@@ -329,7 +367,8 @@ def process_ticket_message(chat_id: str, reply_to_message_id: int | None, file_i
 
     send_message(
         chat_id,
-        "No pude identificar si fue tarjeta, efectivo o mixto. Mándame otra foto más clara porfa 🙏",
+        "⚠️ No identifiqué el método de pago.\n"
+        "Manda otra foto más clara 📸",
         reply_to_message_id,
     )
 
@@ -339,8 +378,9 @@ def process_tip_reply(chat_id: str, reply_to_message_id: int | None, text: str) 
     if parsed_tip is None:
         send_message(
             chat_id,
-            "No pude leer la propina. Respóndeme solo con un monto, por ejemplo: 50 o $50.\n"
-            "Si el ticket fue mixto, respóndeme así: tarjeta 50 o efectivo 50",
+            "💬 No entendí la propina.\n"
+            "Responde solo con el monto (ej: 50 o $50).\n"
+            "Si fue mixto: tarjeta 50 o efectivo 50",
             reply_to_message_id,
         )
         return
@@ -363,7 +403,6 @@ def process_tip_reply(chat_id: str, reply_to_message_id: int | None, text: str) 
     pending_ticket_date = date.fromisoformat(pending["ticket_date"])
     ctx = get_runtime(pending_ticket_date)
 
-    # volvemos a leer el pendiente pero en la hoja/log del mes correcto
     pending = find_latest_pending_for_chat(ctx.log_ws, chat_id)
     if not pending:
         send_message(
@@ -384,8 +423,8 @@ def process_tip_reply(chat_id: str, reply_to_message_id: int | None, text: str) 
         if final_mode not in {"card", "cash"}:
             send_message(
                 chat_id,
-                "Como ese ticket fue mixto, necesito que me digas dónde fue la propina.\n"
-                "Respóndeme así: tarjeta 80 o efectivo 80",
+                "💬 Ese ticket fue mixto. Dime dónde fue la propina:\n"
+                "tarjeta 80 o efectivo 80",
                 reply_to_message_id,
             )
             return
@@ -426,7 +465,7 @@ def process_tip_reply(chat_id: str, reply_to_message_id: int | None, text: str) 
 
     send_message(
         chat_id,
-        f"Listo, propina registrada: ${tip_amount:.2f} ✅",
+        f"✅ Propina registrada: ${tip_amount:,.2f}",
         reply_to_message_id,
     )
 
@@ -460,7 +499,6 @@ def build_failed_log_payload(chat_id: str, file_id: str, parsed: dict | None = N
         status="OCR_FAILED",
     )
 
-import traceback
 
 modal_secrets = [
     modal.Secret.from_name("castillo-bot-secrets")
@@ -486,7 +524,7 @@ def telegram_webhook(update: dict):
             if text.startswith("/start"):
                 send_message(
                     chat_id,
-                    "Hola 👋 Mándame una foto del ticket y yo lo intento pasar a la hoja del día.",
+                    "👋 ¡Hola! Mándame una foto del ticket y lo paso a la hoja del día.",
                     reply_to_message_id,
                 )
             else:

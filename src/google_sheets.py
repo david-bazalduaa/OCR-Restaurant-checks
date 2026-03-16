@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools
 import json
 import re
 import uuid
@@ -67,6 +68,7 @@ def local_now() -> datetime:
     return datetime.now(ZoneInfo(settings.timezone))
 
 
+@functools.lru_cache(maxsize=1)
 def _credentials() -> Credentials:
     raw = settings.google_service_account_json.strip()
 
@@ -79,6 +81,7 @@ def _credentials() -> Credentials:
     return Credentials.from_service_account_file(raw, scopes=SCOPES)
 
 
+@functools.lru_cache(maxsize=1)
 def _gspread_client() -> gspread.Client:
     return gspread.authorize(_credentials())
 
@@ -243,10 +246,16 @@ def update_log_row(log_ws: gspread.Worksheet, row_number: int, updates: dict) ->
 
 
 def next_free_row(ws: gspread.Worksheet, start_row: int, end_row: int, probe_col: str) -> int:
-    for row in range(start_row, end_row + 1):
-        value = ws.acell(f"{probe_col}{row}").value
-        if not str(value or "").strip():
-            return row
+    """Lee todo el rango de una vez en lugar de celda por celda."""
+    cell_range = f"{probe_col}{start_row}:{probe_col}{end_row}"
+    values = ws.get(cell_range)
+    for i, row_vals in enumerate(values):
+        if not row_vals or not str(row_vals[0] if row_vals else "").strip():
+            return start_row + i
+    # Si todas las filas con valores están llenas, la siguiente libre
+    # es start_row + len(values) (si hay menos filas que el rango)
+    if len(values) < (end_row - start_row + 1):
+        return start_row + len(values)
     raise RuntimeError(f"No hay filas libres en {ws.title} para el rango {start_row}:{end_row}")
 
 
