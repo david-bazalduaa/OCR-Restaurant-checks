@@ -1,30 +1,59 @@
-import httpx
+from __future__ import annotations
+
+import requests
+
+from .settings import settings
 
 
-class TelegramAPI:
-    def __init__(self, bot_token: str):
-        self.bot_token = bot_token
-        self.base_url = f"https://api.telegram.org/bot{bot_token}"
+BASE_BOT_URL = f"https://api.telegram.org/bot{settings.telegram_bot_token}"
+BASE_FILE_URL = f"https://api.telegram.org/file/bot{settings.telegram_bot_token}"
 
-    async def send_message(self, chat_id: int, text: str) -> dict:
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
-                f"{self.base_url}/sendMessage",
-                json={"chat_id": chat_id, "text": text},
-            )
-            resp.raise_for_status()
-            return resp.json()
 
-    async def set_webhook(self, url: str, secret_token: str) -> dict:
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
-                f"{self.base_url}/setWebhook",
-                json={
-                    "url": url,
-                    "secret_token": secret_token,
-                    "drop_pending_updates": True,
-                    "allowed_updates": ["message"],
-                },
-            )
-            resp.raise_for_status()
-            return resp.json()
+def telegram_post(method: str, payload: dict) -> dict:
+    resp = requests.post(f"{BASE_BOT_URL}/{method}", json=payload, timeout=30)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def send_message(chat_id: str | int, text: str, reply_to_message_id: int | None = None) -> dict:
+    payload = {
+        "chat_id": chat_id,
+        "text": text,
+    }
+    if reply_to_message_id:
+        payload["reply_to_message_id"] = reply_to_message_id
+    return telegram_post("sendMessage", payload)
+
+
+def get_file_path(file_id: str) -> str:
+    resp = requests.get(
+        f"{BASE_BOT_URL}/getFile",
+        params={"file_id": file_id},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    if not data.get("ok"):
+        raise RuntimeError(f"No pude obtener file_path para file_id={file_id}")
+    return data["result"]["file_path"]
+
+
+def download_file_bytes(file_id: str) -> bytes:
+    file_path = get_file_path(file_id)
+    resp = requests.get(f"{BASE_FILE_URL}/{file_path}", timeout=60)
+    resp.raise_for_status()
+    return resp.content
+
+
+def extract_best_file_id(message: dict) -> str | None:
+    photos = message.get("photo") or []
+    if photos:
+        return photos[-1]["file_id"]
+
+    document = message.get("document")
+    if document:
+        mime = (document.get("mime_type") or "").lower()
+        if mime.startswith("image/"):
+            return document["file_id"]
+
+    return None

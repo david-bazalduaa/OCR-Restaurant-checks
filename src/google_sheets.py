@@ -1,387 +1,503 @@
+from __future__ import annotations
+
 import json
-from datetime import date
-from typing import Any
+import re
+import uuid
+from dataclasses import dataclass
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
-from google.oauth2 import service_account
+import gspread
+from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
+from gspread.exceptions import WorksheetNotFound
+from gspread.utils import rowcol_to_a1
 
+from .settings import settings
 
-MONTHS_ES = {
-    1: "Enero",
-    2: "Febrero",
-    3: "Marzo",
-    4: "Abril",
-    5: "Mayo",
-    6: "Junio",
-    7: "Julio",
-    8: "Agosto",
-    9: "Septiembre",
-    10: "Octubre",
-    11: "Noviembre",
-    12: "Diciembre",
-}
 
 SCOPES = [
-    "https://www.googleapis.com/auth/drive",
     "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
 ]
 
+MONTHS_ES = [
+    "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
+    "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre",
+]
 
-def _escape_drive_query_value(value: str) -> str:
-    return value.replace("\\", "\\\\").replace("'", "\\'")
+# columnas fijas según tu plantilla
+CARD_COLS = {
+    "no": "A",
+    "personas": "B",
+    "mesa": "C",
+    "mesero": "D",
+    "importe": "E",
+    "propina": "F",
+    "responsable": "G",
+    "tarjeta": "H",
+    "numero": "I",
+}
+
+CASH_COLS = {
+    "no": "A",
+    "personas": "B",
+    "mesa": "C",
+    "mesero": "D",
+    "importe": "E",
+    "propina": "F",
+    "responsable": "G",
+}
+
+TIP_SIDE_COLS = {
+    "no": "K",
+    "propina": "L",
+}
 
 
-class GoogleSheetsRepository:
-    def __init__(self, service_account_json: str, year_folder_id: str):
-        self.year_folder_id = year_folder_id
+@dataclass
+class RuntimeContext:
+    spreadsheet: gspread.Spreadsheet
+    day_ws: gspread.Worksheet
+    log_ws: gspread.Worksheet
+    config: dict
 
-        info = json.loads(service_account_json)
-        credentials = service_account.Credentials.from_service_account_info(
-            info,
-            scopes=SCOPES,
+
+def local_now() -> datetime:
+    return datetime.now(ZoneInfo(settings.timezone))
+
+
+def _credentials() -> Credentials:
+    raw = settings.google_service_account_json.strip()
+
+    if raw.startswith("{"):
+        info = json.loads(raw)
+        if "private_key" in info:
+            info["private_key"] = info["private_key"].replace("\\n", "\n")
+        return Credentials.from_service_account_info(info, scopes=SCOPES)
+
+    return Credentials.from_service_account_file(raw, scopes=SCOPES)
+
+
+def _gspread_client() -> gspread.Client:
+    return gspread.authorize(_credentials())
+
+
+def _drive_service():
+    return build("drive", "v3", credentials=_credentials(), cache_discovery=False)
+
+
+def month_name_es(ticket_date: date) -> str:
+    return MONTHS_ES[ticket_date.month - 1]
+
+
+def normalize_header(header: str) -> str:
+    header = (header or "").strip().lower()
+    header = re.sub(r"[^a-z0-9]+", "_", header)
+    return header.strip("_")
+
+
+def parse_int(value, default: int) -> int:
+    try:
+        return int(str(value).strip())
+    except Exception:
+        return default
+
+
+def parse_float(value, default: float = 0.0) -> float:
+    try:
+        s = str(value).strip().replace("$", "").replace(",", "")
+        return float(s)
+    except Exception:
+        return default
+
+
+def safe_cell(v):
+    return "" if v is None else v
+
+
+def format_money(v: float | None):
+    if v is None:
+        return ""
+    return round(float(v), 2)
+
+
+def find_month_spreadsheet_id(ticket_date: date) -> str:
+    month_name = month_name_es(ticket_date)
+    drive = _drive_service()
+
+    query = (
+        f"name = '{month_name}' "
+        f"and mimeType = 'application/vnd.google-apps.spreadsheet' "
+        f"and '{settings.gdrive_year_folder_id}' in parents "
+        f"and trashed = false"
+    )
+
+    resp = drive.files().list(
+        q=query,
+        fields="files(id,name)",
+        includeItemsFromAllDrives=True,
+        supportsAllDrives=True,
+        pageSize=10,
+    ).execute()
+
+    files = resp.get("files", [])
+    if not files:
+        raise FileNotFoundError(
+            f"No encontré el archivo mensual '{month_name}' dentro de la carpeta del año."
         )
 
-        self.drive = build("drive", "v3", credentials=credentials, cache_discovery=False)
-        self.sheets = build("sheets", "v4", credentials=credentials, cache_discovery=False)
+    return files[0]["id"]
 
-    def month_name_from_date(self, ticket_date: date) -> str:
-        return MONTHS_ES[ticket_date.month]
 
-    def day_sheet_name_from_date(self, ticket_date: date) -> str:
-        return str(ticket_date.day)
+def open_month_spreadsheet(ticket_date: date) -> gspread.Spreadsheet:
+    client = _gspread_client()
+    spreadsheet_id = find_month_spreadsheet_id(ticket_date)
+    return client.open_by_key(spreadsheet_id)
 
-    def find_month_spreadsheet(self, ticket_date: date) -> dict[str, Any] | None:
-        month_name = self.month_name_from_date(ticket_date)
-        safe_name = _escape_drive_query_value(month_name)
 
-        query = (
-            f"'{self.year_folder_id}' in parents "
-            f"and mimeType='application/vnd.google-apps.spreadsheet' "
-            f"and name='{safe_name}' "
-            f"and trashed=false"
+def read_config(spreadsheet: gspread.Spreadsheet) -> dict:
+    ws = spreadsheet.worksheet("CONFIG")
+    rows = ws.get_all_values()
+
+    config = {}
+    for row in rows[1:]:
+        if not row or len(row) < 2:
+            continue
+        key = (row[0] or "").strip()
+        value = (row[1] or "").strip()
+        if key:
+            config[key] = value
+    return config
+
+
+def ensure_day_sheet(spreadsheet: gspread.Spreadsheet, ticket_date: date, config: dict) -> gspread.Worksheet:
+    day_name = str(ticket_date.day)
+
+    try:
+        return spreadsheet.worksheet(day_name)
+    except WorksheetNotFound:
+        template_name = config.get("plantilla_sheet_name", "PLANTILLA")
+        template_ws = spreadsheet.worksheet(template_name)
+        return template_ws.duplicate(new_sheet_name=day_name)
+
+
+def get_runtime(ticket_date: date) -> RuntimeContext:
+    spreadsheet = open_month_spreadsheet(ticket_date)
+    config = read_config(spreadsheet)
+    day_ws = ensure_day_sheet(spreadsheet, ticket_date, config)
+    log_ws = spreadsheet.worksheet(config.get("log_sheet_name", "LOG"))
+    return RuntimeContext(
+        spreadsheet=spreadsheet,
+        day_ws=day_ws,
+        log_ws=log_ws,
+        config=config,
+    )
+
+
+def get_log_records(log_ws: gspread.Worksheet) -> list[dict]:
+    values = log_ws.get_all_values()
+    if not values:
+        return []
+
+    raw_headers = values[0]
+    headers = [normalize_header(h) for h in raw_headers]
+
+    records = []
+    for idx, row in enumerate(values[1:], start=2):
+        record = {}
+        for i, header in enumerate(headers):
+            record[header] = row[i] if i < len(row) else ""
+        record["_row"] = idx
+        records.append(record)
+    return records
+
+
+def append_log_record(log_ws: gspread.Worksheet, payload: dict) -> int:
+    headers_raw = log_ws.row_values(1)
+    headers = [normalize_header(h) for h in headers_raw]
+    row = [payload.get(h, "") for h in headers]
+
+    log_ws.append_row(row, value_input_option="USER_ENTERED")
+    return len(log_ws.get_all_values())
+
+
+def update_log_row(log_ws: gspread.Worksheet, row_number: int, updates: dict) -> None:
+    headers_raw = log_ws.row_values(1)
+    headers = [normalize_header(h) for h in headers_raw]
+    header_to_col = {h: i + 1 for i, h in enumerate(headers)}
+
+    batch = []
+    for key, value in updates.items():
+        if key not in header_to_col:
+            continue
+        col = header_to_col[key]
+        a1 = rowcol_to_a1(row_number, col)
+        batch.append({
+            "range": a1,
+            "values": [[value]],
+        })
+
+    if batch:
+        log_ws.batch_update(batch, value_input_option="USER_ENTERED")
+
+
+def next_free_row(ws: gspread.Worksheet, start_row: int, end_row: int, probe_col: str) -> int:
+    for row in range(start_row, end_row + 1):
+        value = ws.acell(f"{probe_col}{row}").value
+        if not str(value or "").strip():
+            return row
+    raise RuntimeError(f"No hay filas libres en {ws.title} para el rango {start_row}:{end_row}")
+
+
+def resolve_card_code_sheet(config: dict, network: str | None, card_type: str | None) -> str:
+    if not network:
+        return ""
+
+    network = network.lower()
+    card_type = (card_type or "").lower()
+
+    if network == "visa" and card_type == "credito":
+        return config.get("visa_credito_code", "CV")
+    if network == "visa" and card_type == "debito":
+        return config.get("visa_debito_code", "DV")
+    if network == "mastercard" and card_type == "credito":
+        return config.get("mastercard_credito_code", "CMC")
+    if network == "mastercard" and card_type == "debito":
+        return config.get("mastercard_debito_code", "DMC")
+    if network == "amex":
+        return config.get("amex_code", "AMEX")
+
+    return network.upper()
+
+
+def write_tip_side_table(day_ws: gspread.Worksheet, config: dict, tip_amount: float) -> int:
+    start_row = parse_int(config.get("propina_tarjeta_start_row"), 8)
+    end_row = parse_int(config.get("propina_tarjeta_end_row"), 22)
+
+    row = next_free_row(day_ws, start_row, end_row, TIP_SIDE_COLS["propina"])
+    logical_no = row - start_row + 1
+
+    day_ws.update(
+        f"{TIP_SIDE_COLS['no']}{row}:{TIP_SIDE_COLS['propina']}{row}",
+        [[logical_no, format_money(tip_amount)]],
+        value_input_option="USER_ENTERED",
+    )
+    return row
+
+
+def write_tarjeta(day_ws: gspread.Worksheet, config: dict, payload: dict, responsable: str) -> tuple[int, str]:
+    start_row = parse_int(config.get("tarjeta_start_row"), 8)
+    end_row = parse_int(config.get("tarjeta_end_row"), 30)
+
+    row = next_free_row(day_ws, start_row, end_row, CARD_COLS["importe"])
+    logical_no = row - start_row + 1
+
+    tip = payload.get("tip_in_card")
+    card_label = payload.get("card_code_sheet") or payload.get("card_network") or ""
+
+    values = [[
+        logical_no,
+        safe_cell(payload.get("personas")),
+        safe_cell(payload.get("mesa")),
+        safe_cell(payload.get("mesero")),
+        format_money(payload.get("importe")),
+        format_money(tip) if tip not in (None, "") else "",
+        responsable,
+        card_label,
+        safe_cell(payload.get("card_last4")),
+    ]]
+
+    day_ws.update(
+        f"{CARD_COLS['no']}{row}:{CARD_COLS['numero']}{row}",
+        values,
+        value_input_option="USER_ENTERED",
+    )
+
+    if tip not in (None, "", 0, 0.0):
+        write_tip_side_table(day_ws, config, float(tip))
+
+    return row, config.get("ingreso_tarjeta_table_name", "ingreso_tarjeta")
+
+
+def write_efectivo(day_ws: gspread.Worksheet, config: dict, payload: dict, responsable: str) -> tuple[int, str]:
+    start_row = parse_int(config.get("efectivo_start_row"), 40)
+    end_row = parse_int(config.get("efectivo_end_row"), 60)
+
+    row = next_free_row(day_ws, start_row, end_row, CASH_COLS["importe"])
+    logical_no = row - start_row + 1
+
+    values = [[
+        logical_no,
+        safe_cell(payload.get("personas")),
+        safe_cell(payload.get("mesa")),
+        safe_cell(payload.get("mesero")),
+        format_money(payload.get("importe")),
+        format_money(payload.get("tip_in_cash")) if payload.get("tip_in_cash") not in (None, "") else "",
+        responsable,
+    ]]
+
+    day_ws.update(
+        f"{CASH_COLS['no']}{row}:{CASH_COLS['responsable']}{row}",
+        values,
+        value_input_option="USER_ENTERED",
+    )
+
+    if payload.get("tip_in_cash") not in (None, "", 0, 0.0):
+        write_tip_side_table(day_ws, config, float(payload["tip_in_cash"]))
+
+    return row, config.get("ingreso_efectivo_table_name", "ingreso_efectivo")
+
+
+def write_propina_tarjeta_efectivo(
+    day_ws: gspread.Worksheet,
+    config: dict,
+    pending_record: dict,
+    tip_amount: float,
+    tip_target_mode: str | None = None,
+) -> None:
+    target_table = str(pending_record["target_table"])
+    target_row_raw = str(pending_record["target_row"])
+
+    card_table = config.get("ingreso_tarjeta_table_name", "ingreso_tarjeta")
+    cash_table = config.get("ingreso_efectivo_table_name", "ingreso_efectivo")
+
+    if target_table == card_table:
+        row = int(target_row_raw)
+        day_ws.update(
+            f"{CARD_COLS['propina']}{row}",
+            [[format_money(tip_amount)]],
+            value_input_option="USER_ENTERED",
         )
 
-        response = self.drive.files().list(
-            q=query,
-            fields="files(id, name)",
-            pageSize=10,
-            supportsAllDrives=True,
-            includeItemsFromAllDrives=True,
-        ).execute()
-
-        files = response.get("files", [])
-        return files[0] if files else None
-
-    def get_month_spreadsheet(self, ticket_date: date) -> dict[str, Any]:
-        existing = self.find_month_spreadsheet(ticket_date)
-        if existing:
-            return existing
-
-        month_name = self.month_name_from_date(ticket_date)
-        raise ValueError(
-            f"No encontré el archivo mensual '{month_name}' dentro de la carpeta configurada. "
-            f"Créalo manualmente dentro de la carpeta del año y compártelo con la service account."
+    elif target_table == cash_table:
+        row = int(target_row_raw)
+        day_ws.update(
+            f"{CASH_COLS['propina']}{row}",
+            [[format_money(tip_amount)]],
+            value_input_option="USER_ENTERED",
         )
 
-    def get_spreadsheet_metadata(self, spreadsheet_id: str) -> dict[str, Any]:
-        return self.sheets.spreadsheets().get(
-            spreadsheetId=spreadsheet_id
-        ).execute()
+    elif target_table == "mixto":
+        try:
+            card_row_str, cash_row_str = target_row_raw.split("|")
+            card_row = int(card_row_str)
+            cash_row = int(cash_row_str)
+        except Exception as e:
+            raise RuntimeError(f"No pude leer target_row mixto={target_row_raw}") from e
 
-    def find_sheet_id(self, spreadsheet_id: str, sheet_name: str) -> int | None:
-        metadata = self.get_spreadsheet_metadata(spreadsheet_id)
-        for sheet in metadata.get("sheets", []):
-            props = sheet.get("properties", {})
-            if props.get("title") == sheet_name:
-                return props.get("sheetId")
-        return None
-
-    def ensure_day_sheet(
-        self,
-        spreadsheet_id: str,
-        day_sheet_name: str,
-        plantilla_sheet_name: str = "PLANTILLA",
-    ) -> int:
-        existing_sheet_id = self.find_sheet_id(spreadsheet_id, day_sheet_name)
-        if existing_sheet_id is not None:
-            return existing_sheet_id
-
-        plantilla_sheet_id = self.find_sheet_id(spreadsheet_id, plantilla_sheet_name)
-        if plantilla_sheet_id is None:
-            raise ValueError(
-                f"No encontré la hoja plantilla '{plantilla_sheet_name}' en el archivo."
+        if tip_target_mode == "card":
+            day_ws.update(
+                f"{CARD_COLS['propina']}{card_row}",
+                [[format_money(tip_amount)]],
+                value_input_option="USER_ENTERED",
             )
+        elif tip_target_mode == "cash":
+            day_ws.update(
+                f"{CASH_COLS['propina']}{cash_row}",
+                [[format_money(tip_amount)]],
+                value_input_option="USER_ENTERED",
+            )
+        else:
+            raise RuntimeError("Para un ticket mixto necesito tip_target_mode='card' o 'cash'.")
 
-        response = self.sheets.spreadsheets().batchUpdate(
-            spreadsheetId=spreadsheet_id,
-            body={
-                "requests": [
-                    {
-                        "duplicateSheet": {
-                            "sourceSheetId": plantilla_sheet_id,
-                            "newSheetName": day_sheet_name,
-                        }
-                    }
-                ]
-            },
-        ).execute()
+    else:
+        raise RuntimeError(f"No reconozco target_table={target_table}")
 
-        replies = response.get("replies", [])
-        return replies[0]["duplicateSheet"]["properties"]["sheetId"]
+    write_tip_side_table(day_ws, config, tip_amount)
 
-    def read_config(
-        self,
-        spreadsheet_id: str,
-        config_sheet_name: str = "CONFIG",
-    ) -> dict[str, str]:
-        response = self.sheets.spreadsheets().values().get(
-            spreadsheetId=spreadsheet_id,
-            range=f"{config_sheet_name}!A2:C200",
-        ).execute()
 
-        rows = response.get("values", [])
-        config: dict[str, str] = {}
+def build_log_payload(
+    *,
+    parsed: dict,
+    responsable: str,
+    target_table: str,
+    target_row: int | str,
+    telegram_chat_id: str,
+    telegram_file_id: str,
+    status: str,
+    tip_in_card: float | None = None,
+    tip_in_cash: float | None = None,
+    tip_mode_final: str = "",
+    record_id: str | None = None,
+) -> dict:
+    ticket_date = parsed["ticket_date"]
+    ticket_dt = date.fromisoformat(ticket_date)
 
-        for row in rows:
-            if len(row) >= 2 and row[0]:
-                config[row[0]] = row[1]
+    importe = parsed.get("importe") or 0.0
+    total_cobrado = importe + (tip_in_card or 0.0) + (tip_in_cash or 0.0)
 
-        return config
+    return {
+        "record_id": record_id or uuid.uuid4().hex[:12],
+        "created_at": local_now().isoformat(),
+        "ticket_date": ticket_date,
+        "year": ticket_dt.year,
+        "month_name": month_name_es(ticket_dt),
+        "day_sheet": str(ticket_dt.day),
+        "payment_method": parsed.get("payment_method", ""),
+        "mesa": parsed.get("mesa", ""),
+        "mesero": parsed.get("mesero", ""),
+        "personas": parsed.get("personas", ""),
+        "importe": format_money(parsed.get("importe")),
+        "tip_in_card": format_money(tip_in_card),
+        "tip_in_cash": format_money(tip_in_cash),
+        "tip_mode_final": tip_mode_final,
+        "card_network": parsed.get("card_network", ""),
+        "card_type": parsed.get("card_type", ""),
+        "card_code_sheet": parsed.get("card_code_sheet", ""),
+        "card_last4": parsed.get("card_last4", ""),
+        "voucher_operation": parsed.get("voucher_operation", ""),
+        "total_cobrado": format_money(total_cobrado),
+        "responsable": responsable,
+        "target_table": target_table,
+        "target_row": target_row,
+        "telegram_chat_id": str(telegram_chat_id),
+        "telegram_file_id": telegram_file_id,
+        "ocr_raw_text": parsed.get("ocr_raw_text", ""),
+        "status": status,
+    }
 
-    def next_empty_row(
-        self,
-        spreadsheet_id: str,
-        sheet_name: str,
-        column: str,
-        start_row: int,
-        end_row: int,
-    ) -> int:
-        response = self.sheets.spreadsheets().values().get(
-            spreadsheetId=spreadsheet_id,
-            range=f"{sheet_name}!{column}{start_row}:{column}{end_row}",
-        ).execute()
 
-        rows = response.get("values", [])
+def is_duplicate(log_ws: gspread.Worksheet, config: dict, parsed: dict) -> bool:
+    key_fields_raw = config.get("duplicate_key_fields", "ticket_date|mesa|importe|card_last4")
+    key_fields = [normalize_header(x) for x in key_fields_raw.split("|") if x.strip()]
+    records = get_log_records(log_ws)
 
-        for offset in range(end_row - start_row + 1):
-            row_number = start_row + offset
-            value = ""
+    probe = {
+        "ticket_date": str(parsed.get("ticket_date") or ""),
+        "mesa": str(parsed.get("mesa") or ""),
+        "importe": str(format_money(parsed.get("importe")) or ""),
+        "card_last4": str(parsed.get("card_last4") or ""),
+    }
 
-            if offset < len(rows) and rows[offset]:
-                value = str(rows[offset][0]).strip()
+    for rec in records:
+        status = (rec.get("status") or "").upper()
+        if status in {"OCR_FAILED", "PARSE_FAILED"}:
+            continue
 
-            if value == "":
-                return row_number
+        matches = True
+        for field in key_fields:
+            left = str(rec.get(field, "") or "").strip()
+            right = str(probe.get(field, "") or "").strip()
+            if left != right:
+                matches = False
+                break
 
-        raise ValueError(
-            f"No encontré filas vacías en {sheet_name}!{column}{start_row}:{column}{end_row}"
-        )
+        if matches:
+            return True
 
-    def get_next_folio(
-        self,
-        spreadsheet_id: str,
-        sheet_name: str,
-        start_row: int,
-        end_row: int,
-    ) -> int:
-        response = self.sheets.spreadsheets().values().get(
-            spreadsheetId=spreadsheet_id,
-            range=f"{sheet_name}!A{start_row}:A{end_row}",
-        ).execute()
+    return False
 
-        rows = response.get("values", [])
-        max_folio = 0
 
-        for row in rows:
-            if not row:
-                continue
-            raw_value = str(row[0]).strip()
-            if raw_value.isdigit():
-                max_folio = max(max_folio, int(raw_value))
+def find_latest_pending_for_chat(log_ws: gspread.Worksheet, chat_id: str | int) -> dict | None:
+    chat_id = str(chat_id)
+    records = get_log_records(log_ws)
+    pending_statuses = {"PENDING_TIP_CARD", "PENDING_TIP_EFECTIVO", "PENDING_TIP_MIXTO"}
 
-        return max_folio + 1
+    for rec in reversed(records):
+        if str(rec.get("telegram_chat_id", "")) != chat_id:
+            continue
+        if str(rec.get("status", "")).upper() in pending_statuses:
+            return rec
 
-    def write_tarjeta(
-        self,
-        spreadsheet_id: str,
-        sheet_name: str,
-        personas: int | str,
-        mesa: str,
-        mesero: str,
-        importe: float | str,
-        propina: float | str | None,
-        responsable: str,
-        tarjeta: str,
-        numero: str,
-        start_row: int,
-        end_row: int,
-    ) -> dict[str, Any]:
-        row = self.next_empty_row(
-            spreadsheet_id=spreadsheet_id,
-            sheet_name=sheet_name,
-            column="A",
-            start_row=start_row,
-            end_row=end_row,
-        )
-
-        folio = self.get_next_folio(
-            spreadsheet_id=spreadsheet_id,
-            sheet_name=sheet_name,
-            start_row=start_row,
-            end_row=end_row,
-        )
-
-        values = [[
-            folio,
-            personas,
-            mesa,
-            mesero,
-            importe,
-            "" if propina is None else propina,
-            responsable,
-            tarjeta,
-            numero,
-        ]]
-
-        self.sheets.spreadsheets().values().update(
-            spreadsheetId=spreadsheet_id,
-            range=f"{sheet_name}!A{row}:I{row}",
-            valueInputOption="USER_ENTERED",
-            body={"values": values},
-        ).execute()
-
-        return {
-            "folio": folio,
-            "row": row,
-            "table": "ingreso_tarjeta",
-        }
-
-    def write_propina_tarjeta_efectivo(
-        self,
-        spreadsheet_id: str,
-        sheet_name: str,
-        folio: int,
-        propina: float | str,
-        start_row: int,
-        end_row: int,
-    ) -> dict[str, Any]:
-        row = self.next_empty_row(
-            spreadsheet_id=spreadsheet_id,
-            sheet_name=sheet_name,
-            column="L",
-            start_row=start_row,
-            end_row=end_row,
-        )
-
-        values = [[folio, propina]]
-
-        self.sheets.spreadsheets().values().update(
-            spreadsheetId=spreadsheet_id,
-            range=f"{sheet_name}!L{row}:M{row}",
-            valueInputOption="USER_ENTERED",
-            body={"values": values},
-        ).execute()
-
-        return {
-            "folio": folio,
-            "row": row,
-            "table": "propina_tarjeta_efectivo",
-        }
-
-    def write_efectivo(
-        self,
-        spreadsheet_id: str,
-        sheet_name: str,
-        personas: int | str,
-        mesa: str,
-        mesero: str,
-        importe: float | str,
-        propina: float | str | None,
-        responsable: str,
-        start_row: int,
-        end_row: int,
-    ) -> dict[str, Any]:
-        row = self.next_empty_row(
-            spreadsheet_id=spreadsheet_id,
-            sheet_name=sheet_name,
-            column="A",
-            start_row=start_row,
-            end_row=end_row,
-        )
-
-        folio = self.get_next_folio(
-            spreadsheet_id=spreadsheet_id,
-            sheet_name=sheet_name,
-            start_row=start_row,
-            end_row=end_row,
-        )
-
-        values = [[
-            folio,
-            personas,
-            mesa,
-            mesero,
-            importe,
-            "" if propina is None else propina,
-            responsable,
-        ]]
-
-        self.sheets.spreadsheets().values().update(
-            spreadsheetId=spreadsheet_id,
-            range=f"{sheet_name}!A{row}:G{row}",
-            valueInputOption="USER_ENTERED",
-            body={"values": values},
-        ).execute()
-
-        return {
-            "folio": folio,
-            "row": row,
-            "table": "ingreso_efectivo",
-        }
-
-    def append_log(
-        self,
-        spreadsheet_id: str,
-        log_data: list[Any],
-        log_sheet_name: str = "LOG",
-    ) -> None:
-        self.sheets.spreadsheets().values().append(
-            spreadsheetId=spreadsheet_id,
-            range=f"{log_sheet_name}!A:AA",
-            valueInputOption="USER_ENTERED",
-            insertDataOption="INSERT_ROWS",
-            body={"values": [log_data]},
-        ).execute()
-
-    def healthcheck_for_date(self, ticket_date: date) -> dict[str, Any]:
-        spreadsheet = self.get_month_spreadsheet(ticket_date)
-        spreadsheet_id = spreadsheet["id"]
-        day_sheet_name = self.day_sheet_name_from_date(ticket_date)
-
-        config = self.read_config(spreadsheet_id)
-        plantilla_sheet_name = config.get("plantilla_sheet_name", "PLANTILLA")
-
-        day_sheet_id = self.ensure_day_sheet(
-            spreadsheet_id=spreadsheet_id,
-            day_sheet_name=day_sheet_name,
-            plantilla_sheet_name=plantilla_sheet_name,
-        )
-
-        tarjeta_start_row = int(config.get("tarjeta_start_row", "8"))
-        tarjeta_end_row = int(config.get("tarjeta_end_row", "30"))
-        tarjeta_next_row = self.next_empty_row(
-            spreadsheet_id=spreadsheet_id,
-            sheet_name=day_sheet_name,
-            column="A",
-            start_row=tarjeta_start_row,
-            end_row=tarjeta_end_row,
-        )
-
-        return {
-            "spreadsheet_id": spreadsheet_id,
-            "month_name": spreadsheet["name"],
-            "day_sheet_name": day_sheet_name,
-            "day_sheet_id": day_sheet_id,
-            "config_loaded": True,
-            "tarjeta_next_row": tarjeta_next_row,
-        }
+    return None

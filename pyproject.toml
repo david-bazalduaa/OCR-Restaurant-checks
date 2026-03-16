@@ -10,4 +10,8 @@ dependencies = [
     "pydantic>=2",
     "google-api-python-client",
     "google-auth",
+    "gspread",
+    "pytesseract",
+    "Pillow",
+    "requests",
 ]
