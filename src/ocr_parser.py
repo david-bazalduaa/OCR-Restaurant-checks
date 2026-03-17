@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from difflib import SequenceMatcher
 from datetime import datetime, date
 from io import BytesIO
 from zoneinfo import ZoneInfo
@@ -146,10 +147,31 @@ def group_words_into_lines(words: list[dict], y_tolerance: int = 20) -> list[lis
     lines = sorted(lines, key=lambda l: l[0]["top"])
     return lines
 
+def _merge_word_sets(primary: list[dict], secondary: list[dict], tol: int = 30) -> list[dict]:
+    """Merge secondary words into primary when they don't overlap existing ones."""
+    merged = list(primary)
+    for sw in secondary:
+        overlaps = False
+        for pw in merged:
+            if (abs(sw["top"] - pw["top"]) < tol and
+                abs(sw["left"] - pw["left"]) < tol):
+                overlaps = True
+                break
+        if not overlaps:
+            merged.append(sw)
+    return merged
+
 def run_ocr_spatial(image_bytes: bytes) -> tuple[str, list[list[dict]], float | None]:
-    # Hacemos el pass principal gris
+    # Pass 1: grayscale
     gray = preprocess_image(image_bytes, binary=False)
-    words = extract_spatial_data(gray, 6)
+    words_gray = extract_spatial_data(gray, 6)
+    
+    # Pass 2: binary — rescues text from noisy/dark backgrounds
+    bw = preprocess_image(image_bytes, binary=True)
+    words_bw = extract_spatial_data(bw, 6)
+    
+    # Merge: keep gray as primary, add binary-only words
+    words = _merge_word_sets(words_gray, words_bw)
     
     confs = [w["conf"] for w in words if w["conf"] >= 0]
     confidence = round((sum(confs) / len(confs)) / 100, 3) if confs else None
@@ -180,7 +202,7 @@ def extract_ticket_date(text: str) -> str | None:
         return None
 
 def validate_mesa(raw: str | None) -> str | None:
-    """Normaliza la mesa al formato letra+2dígitos (ej: I12, M04) usando estrictamente [IMSP]."""
+    """Normaliza la mesa al formato letra+2dígitos (ej: I12, M04) usando [IMSP] con fallback flexible."""
     if not raw:
         return None
     raw = raw.strip().upper()
@@ -200,6 +222,18 @@ def validate_mesa(raw: str | None) -> str | None:
     m = re.search(r"([IMSP])(\d{1})(?!\d)", raw)
     if m:
         return f"{m.group(1)}0{m.group(2)}"
+    
+    # Fallback flexible: accept any letter+digits if it looks like a table
+    m = re.search(r"([A-Z])(\d{2})", raw)
+    if m:
+        return f"{m.group(1)}{m.group(2)}"
+    m = re.search(r"([A-Z])(\d{1})(?!\d)", raw)
+    if m:
+        return f"{m.group(1)}0{m.group(2)}"
+    
+    # Last resort: just digits (e.g. "04")
+    if re.fullmatch(r"\d{1,3}", raw):
+        return raw
     
     return None
 
@@ -280,21 +314,85 @@ def extract_personas_spatial(lines: list[list[dict]]) -> int | None:
     return None
 
 def extract_mesero(text: str) -> str | None:
+    # Broader regex: allow digits and special chars that OCR may inject
     patterns = [
-        r"\bMESERO\s*[:#-]?\s*([A-ZÑ ]{3,40})",
-        r"\bATENDIO\s*[:#-]?\s*([A-ZÑ ]{3,40})",
-        r"\bVENDEDOR\s*[:#-]?\s*([A-ZÑ ]{3,40})",
-        r"\bCAJERO\s*[:#-]?\s*([A-ZÑ ]{3,40})",
+        r"\bMESERO\s*[:#-]?\s*([A-ZÑ0-9 .]{2,40})",
+        r"\bATENDIO\s*[:#-]?\s*([A-ZÑ0-9 .]{2,40})",
+        r"\bVENDEDOR\s*[:#-]?\s*([A-ZÑ0-9 .]{2,40})",
+        r"\bCAJERO\s*[:#-]?\s*([A-ZÑ0-9 .]{2,40})",
     ]
     for p in patterns:
         m = re.search(p, text)
         if m:
             candidate = m.group(1).strip()
             candidate = re.sub(r"\s{2,}", " ", candidate)
-            candidate = candidate.split("  ")[0].strip()
-            if len(candidate) >= 3:
+            # Take first word-chunk (before double-space or next label)
+            candidate = re.split(r"\s{2,}|\bHORA\b|\bCAJERO\b|\bFECHA\b", candidate)[0].strip()
+            # Strip trailing dots/digits that are pure noise
+            candidate = re.sub(r"[.0-9]+$", "", candidate).strip()
+            if len(candidate) >= 2:
                 return candidate.title()
     return None
+
+
+def resolve_mesero_flexible(candidate: str | None, config: dict) -> tuple[str | None, str | None]:
+    """
+    Resolve OCR mesero candidate to a canonical name from CONFIG.
+    Returns (resolved_name, warning_or_None).
+    Uses containment, subsequence, and ratio — NO hard threshold cutoff.
+    """
+    if not candidate:
+        return None, None
+    
+    valid_waiters_str = config.get("valid_waiters", "")
+    if not valid_waiters_str:
+        return candidate, None  # no validation list configured
+    
+    official_names = [n.strip() for n in valid_waiters_str.split("|") if n.strip()]
+    if not official_names:
+        return candidate, None
+    
+    candidate_clean = re.sub(r"[^A-Z]", "", candidate.upper())
+    if not candidate_clean:
+        return candidate, "mesero_no_alpha"
+    
+    # 1) Exact alias match
+    for name in official_names:
+        alias_key = f"waiter_aliases_{name.lower()}"
+        aliases_str = config.get(alias_key, "")
+        aliases = [a.strip().upper() for a in aliases_str.split("|") if a.strip()]
+        if candidate.upper() in aliases or candidate_clean in aliases:
+            return name, None
+    
+    # 2) Containment: "JULIIOO" contains "JULIO" (stripped)
+    best_name = None
+    best_score = 0.0
+    for name in official_names:
+        name_clean = re.sub(r"[^A-Z]", "", name.upper())
+        # Direct containment
+        if name_clean in candidate_clean or candidate_clean in name_clean:
+            score = len(name_clean) / max(len(candidate_clean), 1)
+            if score > best_score:
+                best_score = score
+                best_name = name
+    
+    if best_name and best_score >= 0.5:
+        return best_name, None
+    
+    # 3) SequenceMatcher ratio (no cutoff — pick best)
+    for name in official_names:
+        name_upper = name.upper()
+        ratio = SequenceMatcher(None, candidate_clean, re.sub(r"[^A-Z]", "", name_upper)).ratio()
+        if ratio > best_score:
+            best_score = ratio
+            best_name = name
+    
+    if best_name and best_score >= 0.45:
+        warning = None if best_score >= 0.7 else f"mesero_baja_confianza({best_score:.0%})"
+        return best_name, warning
+    
+    # 4) Nothing close enough — return raw candidate with warning
+    return candidate, "mesero_no_match"
 
 def detect_card_network(text: str) -> str | None:
     if "MASTERCARD" in text or "MASTER CARD" in text: return "mastercard"
@@ -442,11 +540,23 @@ def detect_payment_method(
     if re.search(r"\bEFECTIVO\b|\bCASH\b", normalized_text): return "efectivo"
     return "desconocido"
 
+def _fallback_largest_amount(lines: list[list[dict]]) -> float | None:
+    """Last resort: find the single largest monetary amount on the ticket."""
+    biggest = None
+    for l in lines:
+        for w in l:
+            amt = parse_amount_strict(w["text"])
+            if amt is not None and amt > 0:
+                if biggest is None or amt > biggest:
+                    biggest = amt
+    return biggest
+
+
 def parse_ticket_spatial(raw_text: str, lines: list[list[dict]]) -> dict:
     normalized = normalize_text(raw_text)
+    warnings = {}  # per-field warnings
     
     page_width = get_ticket_width(lines)
-    # Extraemos montones principales (lado izquierdo/centro) y opcionalmente propinas (lado derecho)
     main_amounts, right_amounts, propina = extract_amounts_spatial(lines, page_width)
     
     # IMPORTANTE: Total solo debe salir del main ticket, excluyendo la derecha
@@ -481,17 +591,31 @@ def parse_ticket_spatial(raw_text: str, lines: list[list[dict]]) -> dict:
     else:
         importe = restaurant_total or voucher_sale or voucher_total
 
+    # FALLBACK: if no importe via keywords, use the largest amount found
+    if not importe:
+        importe = _fallback_largest_amount(lines)
+        if importe:
+            warnings["importe"] = "fallback_mayor_monto"
+
     ticket_date = extract_ticket_date(normalized)
     mesa = extract_mesa_spatial(lines)
     personas = extract_personas_spatial(lines)
     mesero = extract_mesero(normalized)
     voucher_operation = extract_voucher_operation(normalized)
 
-    # Validacion extra de Propina cruzada
-    # Para asegurar que no confunda el subtotal de la derecha con la propina ni propina con total
-    # Si la "propina" es el exacto mismo valor que el total, significa que OCR confundio la columna del total o que no hay propina impresa distinta al total.
+    # Propina cruzada: si es igual al importe, probablemente OCR confundió
     if propina is not None and propina == importe:
         propina = None
+
+    # Per-field warnings
+    if not mesa:
+        warnings["mesa"] = "no_detectada"
+    if not personas:
+        warnings["personas"] = "no_detectada"
+    if not mesero:
+        warnings["mesero"] = "no_detectado"
+    if not importe:
+        warnings["importe"] = "no_detectado"
 
     return {
         "ticket_date": ticket_date,
@@ -510,6 +634,7 @@ def parse_ticket_spatial(raw_text: str, lines: list[list[dict]]) -> dict:
         "voucher_sale": voucher_sale,
         "total_detected": voucher_total or restaurant_total,
         "ocr_raw_text": raw_text,
+        "warnings": warnings,
     }
 
 def ocr_and_parse(image_bytes: bytes) -> dict:

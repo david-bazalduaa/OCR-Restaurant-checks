@@ -20,8 +20,10 @@ from .google_sheets import (
 )
 from .ocr_parser import (
     local_today_iso,
+    normalize_text,
     ocr_and_parse,
     parse_tip_reply_message,
+    resolve_mesero_flexible,
 )
 from .settings import settings
 from .telegram_api import download_file_bytes, extract_best_file_id, send_message
@@ -57,6 +59,7 @@ def ticket_summary(parsed: dict) -> str:
     personas = parsed.get("personas") or "s/d"
     pago = parsed.get("payment_method") or "desconocido"
     ticket_date = parsed.get("ticket_date")
+    warnings = parsed.get("warnings") or {}
 
     lines = []
 
@@ -93,6 +96,13 @@ def ticket_summary(parsed: dict) -> str:
     if parsed.get("propina") not in (None, "", 0, 0.0):
         lines.append(f"🎁 Propina: {fmt_money(parsed.get('propina'))}")
 
+    # Show warnings if any
+    if warnings:
+        warn_parts = []
+        for field, msg in warnings.items():
+            warn_parts.append(f"{field}: {msg}")
+        lines.append(f"⚠️ Notas: {', '.join(warn_parts)}")
+
     return "\n".join(lines)
 
 def process_ticket_message(chat_id: str, reply_to_message_id: int | None, file_id: str) -> None:
@@ -117,7 +127,10 @@ def process_ticket_message(chat_id: str, reply_to_message_id: int | None, file_i
         for k in ["importe", "cash_amount", "card_amount", "total_detected"]
     )
 
-    if not has_any_amount:
+    has_any_data = has_any_amount or parsed.get("mesa") or parsed.get("personas") or parsed.get("mesero")
+
+    if not has_any_data:
+        # Truly nothing usable — but still log it
         try:
             failed_payload = build_failed_log_payload(chat_id, file_id, parsed)
             ctx = get_runtime(date.fromisoformat(local_today_iso()))
@@ -127,7 +140,7 @@ def process_ticket_message(chat_id: str, reply_to_message_id: int | None, file_i
 
         send_message(
             chat_id,
-            "⚠️ No pude leer este ticket.\n"
+            "⚠️ No pude extraer datos útiles de esta imagen.\n"
             "Intenta con foto más derecha, completa y con buena luz 📸",
             reply_to_message_id,
         )
@@ -141,7 +154,7 @@ def process_ticket_message(chat_id: str, reply_to_message_id: int | None, file_i
     t5 = time.time()
     print(f"[TIMING] sheets_init={t5-t4:.2f}s")
 
-    responsable = ctx.config.get("responsable_default", "")
+    responsable = ctx.config.get("responsable_default", "MGVR")
 
     parsed["card_code_sheet"] = resolve_card_code_sheet(
         ctx.config,
@@ -149,63 +162,38 @@ def process_ticket_message(chat_id: str, reply_to_message_id: int | None, file_i
         parsed.get("card_type"),
     )
 
-    # --- Validation para Mesero basado en CONFIG (aliases pipe-separated) ---
-    valid_waiters_str = ctx.config.get("valid_waiters", "")
-    if valid_waiters_str:
-        official_names = [n.strip() for n in valid_waiters_str.split("|") if n.strip()]
-        candidate = (parsed.get("mesero") or "").strip()
-        if candidate:
-            candidate_upper = candidate.upper()
-            matched_name = None
-
-            # 1) Buscar en aliases configurados por mesero
-            for name in official_names:
-                alias_key = f"waiter_aliases_{name.lower()}"
-                aliases_str = ctx.config.get(alias_key, "")
-                aliases = [a.strip().upper() for a in aliases_str.split("|") if a.strip()]
-                if candidate_upper in aliases:
-                    matched_name = name
-                    break
-
-            # 2) Fallback: difflib fuzzy match contra nombres oficiales
-            if not matched_name:
-                import difflib
-                threshold = 0.85
-                try:
-                    threshold = float(ctx.config.get("waiter_match_threshold", "0.85"))
-                except ValueError:
-                    pass
-                all_names_upper = [n.upper() for n in official_names]
-                close = difflib.get_close_matches(candidate_upper, all_names_upper, n=1, cutoff=threshold)
-                if close:
-                    idx = all_names_upper.index(close[0])
-                    matched_name = official_names[idx]
-
-            if matched_name:
-                parsed["mesero"] = matched_name
-            else:
-                default_waiter = ctx.config.get("waiter_default", "")
-                parsed["mesero"] = default_waiter if default_waiter else "Dudoso"
+    # --- Flexible mesero resolution using CONFIG aliases ---
+    mesero_resolved, mesero_warning = resolve_mesero_flexible(
+        parsed.get("mesero"), ctx.config
+    )
+    if mesero_resolved:
+        parsed["mesero"] = mesero_resolved
+    if mesero_warning:
+        warnings = parsed.get("warnings") or {}
+        warnings["mesero"] = mesero_warning
+        parsed["warnings"] = warnings
 
     # Validation para Tarjetas basado en CONFIG
     tarjetas_str = ctx.config.get("tarjetas_validas", "")
     if tarjetas_str and not parsed.get("card_network"):
         valid_cards = [c.strip().upper() for c in tarjetas_str.split(",") if c.strip()]
-        from src.ocr_parser import normalize_text
         text_norm = normalize_text(parsed.get("ocr_raw_text", ""))
         for vc in valid_cards:
             if vc in text_norm:
                 parsed["card_network"] = vc.lower()
                 break
 
-    # Validation and limits for Propina
+    # Propina sanity check: warn but keep value (only null if truly absurd)
     propina_val = parsed.get("propina")
     if propina_val is not None and propina_val > 0:
-        # Sanity check: no debe exceder de 3 numeros a la izquierda (menor a 1000 usualmente)
-        # O no mayor al importe mismo (heuristica realista)
         importe_val = parsed.get("importe") or 0.0
-        if propina_val > 999.99 or (importe_val > 0 and propina_val > importe_val):
-            parsed["propina"] = None # Ignore propina si excede valores logicos
+        if propina_val > 9999.99:
+            parsed["propina"] = None  # truly absurd
+        elif propina_val > 999.99 or (importe_val > 0 and propina_val > importe_val):
+            warnings = parsed.get("warnings") or {}
+            warnings["propina"] = f"valor_alto(${propina_val:,.2f})"
+            parsed["warnings"] = warnings
+            # Keep the value — user can review
 
 
     if is_duplicate(ctx.log_ws, ctx.config, parsed):
@@ -426,8 +414,8 @@ def process_ticket_message(chat_id: str, reply_to_message_id: int | None, file_i
 
     send_message(
         chat_id,
-        "⚠️ No identifiqué el método de pago.\n"
-        "Manda otra foto más clara 📸",
+        "⚠️ No identifiqué el método de pago con certeza.\n"
+        "Registré los datos que sí pude extraer:\n\n" + ticket_summary(parsed),
         reply_to_message_id,
     )
 
