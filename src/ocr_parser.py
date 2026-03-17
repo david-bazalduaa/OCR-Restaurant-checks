@@ -700,20 +700,153 @@ def detect_payment_method(
     if re.search(r"\bEFECTIVO\b|\bCASH\b", normalized_text): return "efectivo"
     return "desconocido"
 
-def _fallback_largest_amount(lines: list[list[dict]]) -> float | None:
-    """Last resort: find the single largest PLAUSIBLE monetary amount on the ticket."""
-    biggest = None
+def _moneylike_amount(raw: str | None) -> float | None:
+    """
+    Parse only values that really look like money.
+    This avoids treating folios, CP, operation numbers or versions as amounts.
+    """
+    if not raw:
+        return None
+    token = raw.strip()
+    if not any(ch in token for ch in ".,$"):
+        return None
+    amt = parse_amount_strict(token)
+    if amt is not None and _is_plausible_amount(amt):
+        return amt
+    return None
+
+def extract_x_persona_amount(lines: list[list[dict]]) -> float | None:
+    """Extract the amount shown in lines like 'x Persona: 166.25'."""
     for l in lines:
         line_text = " ".join([w["norm"] for w in l])
-        # Skip lines that look like phone numbers, folios, references, dates
-        if re.search(r"NUMERO|FOLIO|TELEFONO|TEL|SERIE|OPERACION|AUTORIZACION", line_text):
+        if "PERSONA" not in line_text:
             continue
+        values = []
         for w in l:
-            amt = parse_amount_strict(w["text"])
-            if amt is not None and _is_plausible_amount(amt):
-                if biggest is None or amt > biggest:
-                    biggest = amt
-    return biggest
+            amt = _moneylike_amount(w["text"])
+            if amt is not None:
+                values.append(amt)
+        if values:
+            return max(values)
+    return None
+
+def _payment_base_amount(
+    payment_method: str,
+    cash_amount: float | None,
+    card_amount: float | None,
+) -> float | None:
+    """Base amount implied by the payment lines on the main receipt."""
+    if payment_method == "mixto" and cash_amount not in (None, 0) and card_amount not in (None, 0):
+        total = round(cash_amount + card_amount, 2)
+        return total if _is_plausible_amount(total) else None
+    if payment_method == "tarjeta" and card_amount not in (None, 0):
+        return round(card_amount, 2)
+    if payment_method == "efectivo" and cash_amount not in (None, 0):
+        return round(cash_amount, 2)
+    return None
+
+def resolve_importe_amount(
+    lines: list[list[dict]],
+    restaurant_total: float | None,
+    voucher_sale: float | None,
+    payment_method: str,
+    cash_amount: float | None,
+    card_amount: float | None,
+    personas: int | None,
+) -> tuple[float | None, str | None]:
+    """
+    Resolve the ticket importe with a strict priority:
+    1) Main receipt total (TOTALES), unless it is clearly OCR-broken
+    2) Voucher sale (Venta)
+    3) Payment amount(s) from the main receipt
+    4) x Persona * personas
+    5) Safe monetary fallback
+
+    Important:
+    - Never infer importe from folios/CP/operation numbers.
+    - If TOTALES is clearly smaller than the payment amount, trust the payment line.
+      Example: OCR reads 060.00 but payment says 665.00.
+    """
+    payment_base = _payment_base_amount(payment_method, cash_amount, card_amount)
+
+    x_persona_amount = extract_x_persona_amount(lines)
+    x_persona_total = None
+    if x_persona_amount is not None and personas:
+        computed = round(x_persona_amount * personas, 2)
+        if _is_plausible_amount(computed):
+            x_persona_total = computed
+
+    # 1) Main receipt total wins unless it is obviously truncated/broken.
+    if restaurant_total is not None and _is_plausible_amount(restaurant_total):
+        if payment_base is not None and _is_plausible_amount(payment_base):
+            delta = abs(payment_base - restaurant_total)
+            ratio = (restaurant_total / payment_base) if payment_base else 1.0
+
+            # OCR often drops a leading digit on TOTALES (e.g. 665 -> 060).
+            if payment_base > restaurant_total and (delta >= 5.0 or ratio < 0.90):
+                if x_persona_total is not None and abs(x_persona_total - payment_base) <= 1.0:
+                    return x_persona_total, "ajustado_por_x_persona"
+                return payment_base, "ajustado_por_pago"
+
+        return restaurant_total, None
+
+    # 2) Voucher sale is a good direct fallback when available.
+    if voucher_sale is not None and _is_plausible_amount(voucher_sale):
+        return voucher_sale, "inferido_por_venta"
+
+    # 3) Payment lines from the main receipt.
+    if payment_base is not None and _is_plausible_amount(payment_base):
+        if x_persona_total is not None and abs(x_persona_total - payment_base) <= 1.0:
+            return x_persona_total, "inferido_por_x_persona"
+        return payment_base, "inferido_por_pago"
+
+    # 4) Per-person reconstruction.
+    if x_persona_total is not None and _is_plausible_amount(x_persona_total):
+        return x_persona_total, "inferido_por_x_persona"
+
+    # 5) Last resort: only money-looking tokens with decimals/currency.
+    fallback = _fallback_largest_amount(lines)
+    if fallback is not None:
+        return fallback, "fallback_monetario_seguro"
+
+    return None, None
+
+def _fallback_largest_amount(lines: list[list[dict]]) -> float | None:
+    """
+    Last resort for importe.
+    Only considers tokens that actually look like money (decimals/$),
+    so folios and long integer IDs are ignored.
+    """
+    labeled_candidates = []
+    generic_candidates = []
+
+    for l in lines:
+        line_text = " ".join([w["norm"] for w in l])
+
+        # Skip lines that usually contain identifiers instead of money
+        if re.search(r"NUMERO|FOLIO|TELEFONO|TEL|SERIE|OPERACION|AUTORIZACION|AID|CP\b|VERS\b", line_text):
+            continue
+
+        values = []
+        for w in l:
+            amt = _moneylike_amount(w["text"])
+            if amt is not None:
+                values.append(amt)
+
+        if not values:
+            continue
+
+        candidate = max(values)
+        if re.search(r"TOTAL|TOTALES|VENTA|PAGO|RECIBE|CAMBIO|PERSONA", line_text):
+            labeled_candidates.append(candidate)
+        else:
+            generic_candidates.append(candidate)
+
+    if labeled_candidates:
+        return max(labeled_candidates)
+    if generic_candidates:
+        return max(generic_candidates)
+    return None
 
 
 def parse_ticket_spatial(raw_text: str, lines: list[list[dict]]) -> dict:
@@ -768,29 +901,35 @@ def parse_ticket_spatial(raw_text: str, lines: list[list[dict]]) -> dict:
 
     payment_method = detect_payment_method(normalized, cash_amount, card_amount, card_network, card_last4)
 
-    # ---- IMPORTE DECISION ----
-    # Rule: TOTALES from main ticket ALWAYS wins.
-    # Fallback: voucher_sale (Venta = consumo base).
-    # NEVER use voucher_total (includes propina).
-    # NEVER use card_amount or cash_amount as importe (they're partial payments).
-    importe = restaurant_total or voucher_sale
-
-    # FALLBACK: if no importe via keywords, use the largest amount found
-    if not importe:
-        importe = _fallback_largest_amount(lines)
-        if importe:
-            warnings["importe"] = "fallback_mayor_monto"
-
-    # Sanity check: reject absurd importe values
-    if importe is not None and not _is_plausible_amount(importe):
-        warnings["importe"] = f"valor_descartado(${importe:,.2f})"
-        importe = None
-
     ticket_date = extract_ticket_date(normalized)
     mesa = extract_mesa_spatial(lines)
     personas = extract_personas_spatial(lines)
     mesero = extract_mesero(normalized)
     voucher_operation = extract_voucher_operation(normalized)
+
+    # ---- IMPORTE DECISION ----
+    # Priority:
+    #   1) TOTALES del ticket principal
+    #   2) Venta del voucher
+    #   3) Pago(s) del ticket principal
+    #   4) x Persona * personas
+    # This keeps the importe flexible but prevents absurd OCR picks.
+    importe, importe_warning = resolve_importe_amount(
+        lines=lines,
+        restaurant_total=restaurant_total,
+        voucher_sale=voucher_sale,
+        payment_method=payment_method,
+        cash_amount=cash_amount,
+        card_amount=card_amount,
+        personas=personas,
+    )
+    if importe_warning:
+        warnings["importe"] = importe_warning
+
+    # Sanity check: reject absurd importe values
+    if importe is not None and not _is_plausible_amount(importe):
+        warnings["importe"] = f"valor_descartado(${importe:,.2f})"
+        importe = None
 
     # Propina cruzada: si es igual al importe, probablemente OCR confundió
     if propina is not None and propina == importe:
