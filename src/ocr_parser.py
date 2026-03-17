@@ -201,8 +201,16 @@ def extract_ticket_date(text: str) -> str | None:
     except ValueError:
         return None
 
+# OCR letter corrections for mesa: common OCR misreads to valid IMSP letters
+_MESA_LETTER_MAP = {
+    "1": "I", "T": "I", "L": "I", "|": "I",  # visually similar to I
+    "N": "M", "H": "M",                          # visually similar to M
+    "5": "S",                                      # visually similar to S
+    "D": "P", "B": "P",                            # visually similar to P
+}
+
 def validate_mesa(raw: str | None) -> str | None:
-    """Normaliza la mesa al formato letra+2dígitos (ej: I12, M04) usando [IMSP] con fallback flexible."""
+    """Normaliza la mesa al formato [IMSP]\d{2}. SOLO acepta letras I, M, S, P."""
     if not raw:
         return None
     raw = raw.strip().upper()
@@ -213,7 +221,7 @@ def validate_mesa(raw: str | None) -> str | None:
         
     raw = re.sub(r"[^A-Z0-9]+", "", raw)
     
-    # Busqueda con estrictos formatos IMSP
+    # Strict match: [IMSP] + 2 digits
     m = re.search(r"([IMSP])(\d{2})", raw)
     if m:
         return f"{m.group(1)}{m.group(2)}"
@@ -223,18 +231,17 @@ def validate_mesa(raw: str | None) -> str | None:
     if m:
         return f"{m.group(1)}0{m.group(2)}"
     
-    # Fallback flexible: accept any letter+digits if it looks like a table
-    m = re.search(r"([A-Z])(\d{2})", raw)
+    # OCR correction: if letter is NOT [IMSP] but has a known correction, try it
+    m = re.search(r"([A-Z])(\d{1,2})", raw)
     if m:
-        return f"{m.group(1)}{m.group(2)}"
-    m = re.search(r"([A-Z])(\d{1})(?!\d)", raw)
-    if m:
-        return f"{m.group(1)}0{m.group(2)}"
+        letter = m.group(1)
+        digits = m.group(2)
+        corrected = _MESA_LETTER_MAP.get(letter)
+        if corrected:
+            digits = digits.zfill(2)
+            return f"{corrected}{digits}"
     
-    # Last resort: just digits (e.g. "04")
-    if re.fullmatch(r"\d{1,3}", raw):
-        return raw
-    
+    # DO NOT accept invalid letters (A, B, X, etc.) — return None
     return None
 
 def get_line_text_from(line: list[dict], start_idx: int) -> str:
@@ -560,6 +567,16 @@ def get_ticket_width(lines: list[list[dict]]) -> int:
                 max_right = w["right"]
     return max_right if max_right > 0 else 1000
 
+# Max plausible amount for a restaurant ticket (generous cap)
+_MAX_PLAUSIBLE_AMOUNT = 50_000.00
+_MIN_PLAUSIBLE_PROPINA = 5.00  # propina must be at least $5 to be credible
+
+def _is_plausible_amount(amt: float | None) -> bool:
+    """Check if an amount is plausible for a restaurant ticket."""
+    if amt is None:
+        return False
+    return 0.01 <= amt <= _MAX_PLAUSIBLE_AMOUNT
+
 def extract_amounts_spatial(lines: list[list[dict]], page_width: int):
     # Regla: separar la columna derecha (> 60% del ticket ancho aprox)
     right_margin = page_width * 0.60
@@ -574,10 +591,10 @@ def extract_amounts_spatial(lines: list[list[dict]], page_width: int):
         
         for w in l:
             amt = parse_amount_strict(w["text"])
-            if amt is not None and amt > 0:
+            if amt is not None and _is_plausible_amount(amt):
                 if w["left"] >= right_margin:
                     right_amounts.append({"amount": amt, "word": w, "line_text": line_text, "line_idx": i})
-                    if is_propina_label:
+                    if is_propina_label and amt >= _MIN_PLAUSIBLE_PROPINA:
                         propina = amt
                 else:
                     main_amounts.append({"amount": amt, "word": w, "line_text": line_text, "line_idx": i})
@@ -593,7 +610,7 @@ def extract_amounts_spatial(lines: list[list[dict]], page_width: int):
                         for w2 in l:
                             if w2["left"] > w["left"]:
                                 amt = parse_amount_strict(w2["text"])
-                                if amt is not None:
+                                if amt is not None and amt >= _MIN_PLAUSIBLE_PROPINA:
                                     propina = amt
                                     break
                         if propina: break
@@ -601,7 +618,7 @@ def extract_amounts_spatial(lines: list[list[dict]], page_width: int):
                         if i + 1 < len(lines):
                             for w2 in lines[i+1]:
                                 amt = parse_amount_strict(w2["text"])
-                                if amt is not None and w2["left"] >= w["left"] - 80:
+                                if amt is not None and amt >= _MIN_PLAUSIBLE_PROPINA and w2["left"] >= w["left"] - 80:
                                     propina = amt
                                     break
                 if propina: break
@@ -613,17 +630,18 @@ def extract_amounts_spatial(lines: list[list[dict]], page_width: int):
         m = re.search(r"[Pp]ropina\s*[\$:]?\s*(\d[\d.,]*\.\d{2})", full_raw)
         if m:
             amt = parse_amount_strict(m.group(1))
-            if amt is not None and amt > 0:
+            if amt is not None and amt >= _MIN_PLAUSIBLE_PROPINA:
                 propina = amt
 
-    # Fallback: if right_amounts has items, the non-largest might be propina
-    # (typical voucher layout: Venta=largest, Propina=smaller, Total=sum)
-    if propina is None and len(right_amounts) >= 2:
+    # Fallback: if right_amounts has ≥3 items (Venta, Propina, Total layout), 
+    # pick the middle value only if it's labeled or plausible as tip
+    if propina is None and len(right_amounts) >= 3:
         sorted_right = sorted(right_amounts, key=lambda x: x["amount"])
-        # The smallest right-side amount that isn't the total/venta is likely propina
-        candidate_tip = sorted_right[0]["amount"]
-        if candidate_tip < sorted_right[-1]["amount"]:
-            propina = candidate_tip
+        # The middle value is often the propina in a Venta/Propina/Total layout
+        for item in sorted_right[:-1]:  # exclude the largest (Total)
+            if item["amount"] >= _MIN_PLAUSIBLE_PROPINA and "PROPINA" in item.get("line_text", ""):
+                propina = item["amount"]
+                break
 
     # Evitamos que asigne el total del ticket si por alguna razon OCR lo vio como propina por proximidad
     return main_amounts, right_amounts, propina
@@ -683,12 +701,16 @@ def detect_payment_method(
     return "desconocido"
 
 def _fallback_largest_amount(lines: list[list[dict]]) -> float | None:
-    """Last resort: find the single largest monetary amount on the ticket."""
+    """Last resort: find the single largest PLAUSIBLE monetary amount on the ticket."""
     biggest = None
     for l in lines:
+        line_text = " ".join([w["norm"] for w in l])
+        # Skip lines that look like phone numbers, folios, references, dates
+        if re.search(r"NUMERO|FOLIO|TELEFONO|TEL|SERIE|OPERACION|AUTORIZACION", line_text):
+            continue
         for w in l:
             amt = parse_amount_strict(w["text"])
-            if amt is not None and amt > 0:
+            if amt is not None and _is_plausible_amount(amt):
                 if biggest is None or amt > biggest:
                     biggest = amt
     return biggest
@@ -738,6 +760,11 @@ def parse_ticket_spatial(raw_text: str, lines: list[list[dict]]) -> dict:
         importe = _fallback_largest_amount(lines)
         if importe:
             warnings["importe"] = "fallback_mayor_monto"
+
+    # Sanity check: reject absurd importe values
+    if importe is not None and not _is_plausible_amount(importe):
+        warnings["importe"] = f"valor_descartado(${importe:,.2f})"
+        importe = None
 
     ticket_date = extract_ticket_date(normalized)
     mesa = extract_mesa_spatial(lines)
