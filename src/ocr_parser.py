@@ -271,46 +271,95 @@ def extract_mesa_spatial(lines: list[list[dict]]) -> str | None:
     return None
 
 def extract_personas_spatial(lines: list[list[dict]]) -> int | None:
-    # Prioridad espacial
+    _PERS_VARIANTS = {"PERS", "PCRS", "PER5", "PARS", "PERE", "PERZ"}
+    
+    def _is_pers_trigger(search_txt: str) -> bool:
+        if "PERSONA" in search_txt:  # skip "x Persona: 166.25" 
+            return False
+        for v in _PERS_VARIANTS:
+            if v in search_txt:
+                return True
+        if search_txt.endswith("PER") or "PAX" in search_txt or "COMENSAL" in search_txt:
+            return True
+        return False
+
+    def _extract_int(s: str) -> int | None:
+        d = re.sub(r"[^\d]", "", s)
+        if d and 1 <= int(d) <= 99:
+            return int(d)
+        return None
+
+    # --- Pass 1: Spatial search near # Pers label ---
     for i, line in enumerate(lines):
-        line_text = " ".join([w["norm"] for w in line])
         for j, w in enumerate(line):
             t = w["search"]
-            # Variaciones OCR
-            if ("PERS" in t or "PAX" in t or "COMENSAL" in t or "PCRS" in t or "PER5" in t or t.endswith("PER")) and "PERSONA" not in t:
-                # buscar numero a la derecha
-                for k in range(j+1, len(line)):
-                    num_str = re.sub(r"[^\d]", "", line[k]["search"])
-                    if num_str:
-                        return int(num_str)
-                # buscar numero abajo cercano
+            
+            # Case A: word itself contains PERS variant
+            if _is_pers_trigger(t):
+                # embedded digit in same token e.g. "#PERS9" or "PERS:4"
+                m = re.search(r"(?:" + "|".join(_PERS_VARIANTS) + r")[^\d]*(\d{1,2})", t)
+                if m:
+                    return int(m.group(1))
+                # search right on same line
+                for k in range(j + 1, len(line)):
+                    val = _extract_int(line[k]["search"])
+                    if val is not None:
+                        return val
+                # search line below, spatially aligned
                 if i + 1 < len(lines):
-                    for xw in lines[i+1]:
-                        if xw["left"] >= w["left"] - 60 and xw["left"] <= w["right"] + 60:
-                            num_str = re.sub(r"[^\d]", "", xw["search"])
-                            if num_str: return int(num_str)
-    
-    # Fallback si OCR unió el texto "#PERS 3" > "#PERS3"
-    for line in lines:
-        for w in line:
-            m = re.search(r"(?:#?PERS|#?PCRS|#?PER5|PAX|COMENSALES?)[^\d]*(\d{1,2})", w["search"])
-            if m:
-                return int(m.group(1))
-                
-    # Fallback clásico
-    text = "\n".join([get_line_text_from(l, 0) for l in lines])
+                    for xw in lines[i + 1]:
+                        if xw["left"] >= w["left"] - 80 and xw["left"] <= w["right"] + 80:
+                            val = _extract_int(xw["search"])
+                            if val is not None:
+                                return val
+            
+            # Case B: "#" is a separate word, followed by "Pers" or variant
+            if t == "#" and j + 1 < len(line):
+                next_t = line[j + 1]["search"]
+                if _is_pers_trigger(next_t) or any(v in next_t for v in _PERS_VARIANTS):
+                    # embedded
+                    m = re.search(r"(\d{1,2})", next_t)
+                    if m:
+                        return int(m.group(1))
+                    # search further right
+                    for k in range(j + 2, len(line)):
+                        val = _extract_int(line[k]["search"])
+                        if val is not None:
+                            return val
+                    # below
+                    if i + 1 < len(lines):
+                        for xw in lines[i + 1]:
+                            val = _extract_int(xw["search"])
+                            if val is not None:
+                                return val
+
+    # --- Pass 2: full-text regex fallback ---
+    full_text = "\n".join([get_line_text_from(l, 0) for l in lines])
     patterns = [
-        r"#\s*PERS\s*[:#-]?\s*(\d{1,2})\b",
-        r"#\s*PCRS\s*[:#-]?\s*(\d{1,2})\b",
-        r"#\s*PER5\s*[:#-]?\s*(\d{1,2})\b",
-        r"\bPERSONAS?\s*[:#-]?\s*(\d{1,2})\b",
+        r"#\s*Pers\s*[:#-]?\s*(\d{1,2})\b",
+        r"#\s*Pcrs\s*[:#-]?\s*(\d{1,2})\b",
+        r"#\s*Per5\s*[:#-]?\s*(\d{1,2})\b",
+        r"\bPers\s*[:#-]?\s*(\d{1,2})\b",
+        r"\bPersonas?\s*[:#-]?\s*(\d{1,2})\b",
         r"\bPAX\s*[:#-]?\s*(\d{1,2})\b",
+        r"\bComandas\s*[:#-]?\s*(\d{1,2})\b",
     ]
     for p in patterns:
-        m = re.search(p, text, re.I)
+        m = re.search(p, full_text, re.I)
         if m:
-            return int(m.group(1))
-            
+            val = int(m.group(1))
+            if 1 <= val <= 99:
+                return val
+
+    # --- Pass 3: count BUFFET ADULTO items as heuristic ---
+    adulto_count = 0
+    for line in lines:
+        line_raw = " ".join([w["text"] for w in line])
+        if re.search(r"BUFFET\s+ADULTO", line_raw, re.I):
+            adulto_count += 1
+    if adulto_count > 0:
+        return adulto_count
+
     return None
 
 def extract_mesero(text: str) -> str | None:
@@ -335,11 +384,60 @@ def extract_mesero(text: str) -> str | None:
     return None
 
 
+def _lcs_length(a: str, b: str) -> int:
+    """Longest Common Subsequence length (not substring)."""
+    m, n = len(a), len(b)
+    if m == 0 or n == 0:
+        return 0
+    prev = [0] * (n + 1)
+    for i in range(1, m + 1):
+        curr = [0] * (n + 1)
+        for j in range(1, n + 1):
+            if a[i - 1] == b[j - 1]:
+                curr[j] = prev[j - 1] + 1
+            else:
+                curr[j] = max(prev[j], curr[j - 1])
+        prev = curr
+    return prev[n]
+
+
+def _char_overlap_score(cand: str, name: str) -> float:
+    """Fraction of name's unique chars that are present in candidate."""
+    if not name:
+        return 0.0
+    name_chars = set(name)
+    cand_chars = set(cand)
+    if not name_chars:
+        return 0.0
+    return len(name_chars & cand_chars) / len(name_chars)
+
+
+def _edit_distance(a: str, b: str) -> int:
+    """Levenshtein edit distance."""
+    m, n = len(a), len(b)
+    dp = list(range(n + 1))
+    for i in range(1, m + 1):
+        prev = dp[0]
+        dp[0] = i
+        for j in range(1, n + 1):
+            temp = dp[j]
+            if a[i - 1] == b[j - 1]:
+                dp[j] = prev
+            else:
+                dp[j] = 1 + min(prev, dp[j], dp[j - 1])
+            prev = temp
+    return dp[n]
+
+
 def resolve_mesero_flexible(candidate: str | None, config: dict) -> tuple[str | None, str | None]:
     """
     Resolve OCR mesero candidate to a canonical name from CONFIG.
     Returns (resolved_name, warning_or_None).
-    Uses containment, subsequence, and ratio — NO hard threshold cutoff.
+    
+    ALWAYS picks the best candidate — never leaves mesero empty
+    unless candidate text has zero alpha characters.
+    Uses multi-metric scoring: aliases, containment, LCS, char overlap,
+    edit distance, SequenceMatcher.
     """
     if not candidate:
         return None, None
@@ -356,7 +454,7 @@ def resolve_mesero_flexible(candidate: str | None, config: dict) -> tuple[str | 
     if not candidate_clean:
         return candidate, "mesero_no_alpha"
     
-    # 1) Exact alias match
+    # --- Phase 1: Exact alias match (instant) ---
     for name in official_names:
         alias_key = f"waiter_aliases_{name.lower()}"
         aliases_str = config.get(alias_key, "")
@@ -364,35 +462,60 @@ def resolve_mesero_flexible(candidate: str | None, config: dict) -> tuple[str | 
         if candidate.upper() in aliases or candidate_clean in aliases:
             return name, None
     
-    # 2) Containment: "JULIIOO" contains "JULIO" (stripped)
-    best_name = None
-    best_score = 0.0
+    # --- Phase 2: Multi-metric scoring (ALWAYS picks best) ---
+    scores = []  # list of (combined_score, name)
+    
     for name in official_names:
         name_clean = re.sub(r"[^A-Z]", "", name.upper())
-        # Direct containment
-        if name_clean in candidate_clean or candidate_clean in name_clean:
-            score = len(name_clean) / max(len(candidate_clean), 1)
-            if score > best_score:
-                best_score = score
-                best_name = name
+        if not name_clean:
+            continue
+        
+        max_len = max(len(candidate_clean), len(name_clean))
+        
+        # Metric 1: SequenceMatcher ratio (0-1)
+        sm_ratio = SequenceMatcher(None, candidate_clean, name_clean).ratio()
+        
+        # Metric 2: LCS ratio — longest common subsequence / max length (0-1)
+        lcs_len = _lcs_length(candidate_clean, name_clean)
+        lcs_ratio = lcs_len / max_len if max_len > 0 else 0.0
+        
+        # Metric 3: Character overlap — fraction of name chars present in candidate (0-1)
+        char_overlap = _char_overlap_score(candidate_clean, name_clean)
+        
+        # Metric 4: Containment bonus (0 or 0.3)
+        containment = 0.3 if (name_clean in candidate_clean or candidate_clean in name_clean) else 0.0
+        
+        # Metric 5: Edit distance penalty (normalized 0-1, inverted)
+        ed = _edit_distance(candidate_clean, name_clean)
+        ed_score = 1.0 - (ed / max_len) if max_len > 0 else 0.0
+        
+        # Weighted combination
+        combined = (
+            sm_ratio * 0.25 +
+            lcs_ratio * 0.25 +
+            char_overlap * 0.20 +
+            containment * 0.15 +
+            ed_score * 0.15
+        )
+        
+        scores.append((combined, name, sm_ratio))
     
-    if best_name and best_score >= 0.5:
-        return best_name, None
+    if not scores:
+        return candidate, "mesero_no_match"
     
-    # 3) SequenceMatcher ratio (no cutoff — pick best)
-    for name in official_names:
-        name_upper = name.upper()
-        ratio = SequenceMatcher(None, candidate_clean, re.sub(r"[^A-Z]", "", name_upper)).ratio()
-        if ratio > best_score:
-            best_score = ratio
-            best_name = name
+    # Sort by combined score descending — ALWAYS pick the best
+    scores.sort(key=lambda x: x[0], reverse=True)
+    best_combined, best_name, best_sm = scores[0]
     
-    if best_name and best_score >= 0.45:
-        warning = None if best_score >= 0.7 else f"mesero_baja_confianza({best_score:.0%})"
-        return best_name, warning
+    # Confidence-based warning (informational only — never blocks)
+    if best_combined >= 0.55:
+        warning = None  # high confidence
+    elif best_combined >= 0.35:
+        warning = f"mesero_inferido({best_combined:.0%})"
+    else:
+        warning = f"mesero_baja_evidencia({best_combined:.0%})"
     
-    # 4) Nothing close enough — return raw candidate with warning
-    return candidate, "mesero_no_match"
+    return best_name, warning
 
 def detect_card_network(text: str) -> str | None:
     if "MASTERCARD" in text or "MASTER CARD" in text: return "mastercard"
@@ -482,6 +605,25 @@ def extract_amounts_spatial(lines: list[list[dict]], page_width: int):
                                     propina = amt
                                     break
                 if propina: break
+
+    # Fallback: text-based regex over full raw text
+    if propina is None:
+        full_raw = "\n".join([" ".join([w["text"] for w in l]) for l in lines])
+        # Pattern: "Propina" followed by optional $ and number
+        m = re.search(r"[Pp]ropina\s*[\$:]?\s*(\d[\d.,]*\.\d{2})", full_raw)
+        if m:
+            amt = parse_amount_strict(m.group(1))
+            if amt is not None and amt > 0:
+                propina = amt
+
+    # Fallback: if right_amounts has items, the non-largest might be propina
+    # (typical voucher layout: Venta=largest, Propina=smaller, Total=sum)
+    if propina is None and len(right_amounts) >= 2:
+        sorted_right = sorted(right_amounts, key=lambda x: x["amount"])
+        # The smallest right-side amount that isn't the total/venta is likely propina
+        candidate_tip = sorted_right[0]["amount"]
+        if candidate_tip < sorted_right[-1]["amount"]:
+            propina = candidate_tip
 
     # Evitamos que asigne el total del ticket si por alguna razon OCR lo vio como propina por proximidad
     return main_amounts, right_amounts, propina
