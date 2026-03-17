@@ -149,6 +149,65 @@ def process_ticket_message(chat_id: str, reply_to_message_id: int | None, file_i
         parsed.get("card_type"),
     )
 
+    # --- Validation para Mesero basado en CONFIG (aliases pipe-separated) ---
+    valid_waiters_str = ctx.config.get("valid_waiters", "")
+    if valid_waiters_str:
+        official_names = [n.strip() for n in valid_waiters_str.split("|") if n.strip()]
+        candidate = (parsed.get("mesero") or "").strip()
+        if candidate:
+            candidate_upper = candidate.upper()
+            matched_name = None
+
+            # 1) Buscar en aliases configurados por mesero
+            for name in official_names:
+                alias_key = f"waiter_aliases_{name.lower()}"
+                aliases_str = ctx.config.get(alias_key, "")
+                aliases = [a.strip().upper() for a in aliases_str.split("|") if a.strip()]
+                if candidate_upper in aliases:
+                    matched_name = name
+                    break
+
+            # 2) Fallback: difflib fuzzy match contra nombres oficiales
+            if not matched_name:
+                import difflib
+                threshold = 0.85
+                try:
+                    threshold = float(ctx.config.get("waiter_match_threshold", "0.85"))
+                except ValueError:
+                    pass
+                all_names_upper = [n.upper() for n in official_names]
+                close = difflib.get_close_matches(candidate_upper, all_names_upper, n=1, cutoff=threshold)
+                if close:
+                    idx = all_names_upper.index(close[0])
+                    matched_name = official_names[idx]
+
+            if matched_name:
+                parsed["mesero"] = matched_name
+            else:
+                default_waiter = ctx.config.get("waiter_default", "")
+                parsed["mesero"] = default_waiter if default_waiter else "Dudoso"
+
+    # Validation para Tarjetas basado en CONFIG
+    tarjetas_str = ctx.config.get("tarjetas_validas", "")
+    if tarjetas_str and not parsed.get("card_network"):
+        valid_cards = [c.strip().upper() for c in tarjetas_str.split(",") if c.strip()]
+        from src.ocr_parser import normalize_text
+        text_norm = normalize_text(parsed.get("ocr_raw_text", ""))
+        for vc in valid_cards:
+            if vc in text_norm:
+                parsed["card_network"] = vc.lower()
+                break
+
+    # Validation and limits for Propina
+    propina_val = parsed.get("propina")
+    if propina_val is not None and propina_val > 0:
+        # Sanity check: no debe exceder de 3 numeros a la izquierda (menor a 1000 usualmente)
+        # O no mayor al importe mismo (heuristica realista)
+        importe_val = parsed.get("importe") or 0.0
+        if propina_val > 999.99 or (importe_val > 0 and propina_val > importe_val):
+            parsed["propina"] = None # Ignore propina si excede valores logicos
+
+
     if is_duplicate(ctx.log_ws, ctx.config, parsed):
         log_payload = build_log_payload(
             parsed=parsed,

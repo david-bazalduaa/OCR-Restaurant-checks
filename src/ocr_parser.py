@@ -180,30 +180,27 @@ def extract_ticket_date(text: str) -> str | None:
         return None
 
 def validate_mesa(raw: str | None) -> str | None:
-    """Normaliza la mesa al formato letra+2dígitos (ej: A12, M04) si tiene sentido."""
+    """Normaliza la mesa al formato letra+2dígitos (ej: I12, M04) usando estrictamente [IMSP]."""
     if not raw:
         return None
     raw = raw.strip().upper()
-    raw = re.sub(r"^[^A-Z0-9]+", "", raw)
-    raw = re.sub(r"[^A-Z0-9]+$", "", raw)
     
     # REGLA: Si lee un 1 al inicio, convertir a "I" mayuscula.
     if raw.startswith("1") and len(raw) >= 2:
         raw = "I" + raw[1:]
+        
+    raw = re.sub(r"[^A-Z0-9]+", "", raw)
     
-    if re.fullmatch(r"[A-Z]\d{2}", raw):
-        return raw
-    m = re.fullmatch(r"([A-Z])(\d)", raw)
+    # Busqueda con estrictos formatos IMSP
+    m = re.search(r"([IMSP])(\d{2})", raw)
+    if m:
+        return f"{m.group(1)}{m.group(2)}"
+        
+    # Tolerancia: 1 digito ej M4 -> M04
+    m = re.search(r"([IMSP])(\d{1})(?!\d)", raw)
     if m:
         return f"{m.group(1)}0{m.group(2)}"
-    if re.fullmatch(r"\d{1,3}", raw):
-        return raw
-    m = re.search(r"\b([A-Z]\d{1,2})\b", raw)
-    if m:
-         return validate_mesa(m.group(1))
     
-    if len(raw) <= 5 and re.match(r"^[A-Z0-9]*\d+[A-Z0-9]*$", raw):
-         return raw
     return None
 
 def get_line_text_from(line: list[dict], start_idx: int) -> str:
@@ -245,23 +242,24 @@ def extract_personas_spatial(lines: list[list[dict]]) -> int | None:
         line_text = " ".join([w["norm"] for w in line])
         for j, w in enumerate(line):
             t = w["search"]
-            if ("PERS" in t or "PAX" in t or "COMENSAL" in t or "PARS" in t or t.endswith("PER")) and "PERSONA" not in t:
+            # Variaciones OCR
+            if ("PERS" in t or "PAX" in t or "COMENSAL" in t or "PCRS" in t or "PER5" in t or t.endswith("PER")) and "PERSONA" not in t:
                 # buscar numero a la derecha
                 for k in range(j+1, len(line)):
                     num_str = re.sub(r"[^\d]", "", line[k]["search"])
                     if num_str:
                         return int(num_str)
-                # buscar numero abajo
+                # buscar numero abajo cercano
                 if i + 1 < len(lines):
                     for xw in lines[i+1]:
-                        if xw["left"] >= w["left"] - 50:
+                        if xw["left"] >= w["left"] - 60 and xw["left"] <= w["right"] + 60:
                             num_str = re.sub(r"[^\d]", "", xw["search"])
                             if num_str: return int(num_str)
     
     # Fallback si OCR unió el texto "#PERS 3" > "#PERS3"
     for line in lines:
         for w in line:
-            m = re.search(r"(?:#?PERS|PAX|COMENSALES?)[^\d]*(\d{1,2})", w["search"])
+            m = re.search(r"(?:#?PERS|#?PCRS|#?PER5|PAX|COMENSALES?)[^\d]*(\d{1,2})", w["search"])
             if m:
                 return int(m.group(1))
                 
@@ -269,6 +267,8 @@ def extract_personas_spatial(lines: list[list[dict]]) -> int | None:
     text = "\n".join([get_line_text_from(l, 0) for l in lines])
     patterns = [
         r"#\s*PERS\s*[:#-]?\s*(\d{1,2})\b",
+        r"#\s*PCRS\s*[:#-]?\s*(\d{1,2})\b",
+        r"#\s*PER5\s*[:#-]?\s*(\d{1,2})\b",
         r"\bPERSONAS?\s*[:#-]?\s*(\d{1,2})\b",
         r"\bPAX\s*[:#-]?\s*(\d{1,2})\b",
     ]
