@@ -723,18 +723,40 @@ def parse_ticket_spatial(raw_text: str, lines: list[list[dict]]) -> dict:
     page_width = get_ticket_width(lines)
     main_amounts, right_amounts, propina = extract_amounts_spatial(lines, page_width)
     
-    # IMPORTANTE: Total solo debe salir del main ticket, excluyendo la derecha
-    restaurant_total = find_amount_by_keyword_spatial(main_amounts, ["TOTALES", "TOTAL CONSUMO", "TOTAL:", "TOTALES:"])
-    voucher_total = find_amount_by_keyword_spatial(main_amounts, ["TOTAL", "OTAL "])
-    voucher_sale = find_amount_by_keyword_spatial(main_amounts, ["VENTA"])
+    # ---- IMPORTE HIERARCHY ----
+    # The key distinction:
+    #   restaurant_total = TOTALES from main ticket (=consumo, THE correct importe)
+    #   voucher_sale     = "Venta" from voucher   (=consumo base, good fallback)
+    #   voucher_total    = "Total" from voucher   (=consumo+propina, NEVER use as importe)
+    #
+    # Priority: restaurant_total > voucher_sale > fallback
+    # NEVER: voucher_total, card_amount (partial), cash_amount (partial)
+
+    # Step 1: Find TOTALES from the main ticket (strict label match)
+    restaurant_total = find_amount_by_keyword_spatial(
+        main_amounts, ["TOTALES", "TOTAL CONSUMO", "TOTALES:"]
+    )
     
-    # Fallback si por alguna razon extrema nada caia en el "main":
-    if not (restaurant_total or voucher_total):
+    # Step 2: Find Venta from voucher (consumo base)
+    voucher_sale = find_amount_by_keyword_spatial(main_amounts, ["VENTA"])
+    if not voucher_sale:
+        voucher_sale = find_amount_by_keyword_spatial(right_amounts, ["VENTA"])
+    
+    # Step 3: Find voucher Total (ONLY for metadata, never for importe)
+    voucher_total = find_amount_by_keyword_spatial(right_amounts, ["TOTAL"])
+    if not voucher_total:
+        # Only match "TOTAL" in main if it's NOT the same as TOTALES
+        for item in main_amounts:
+            if "TOTAL" in item["line_text"] and "TOTALES" not in item["line_text"]:
+                voucher_total = item["amount"]
+                break
+    
+    # Step 4: Fallback — search across all amounts if main had nothing
+    if not restaurant_total:
         all_amts = main_amounts + right_amounts
-        restaurant_total = find_amount_by_keyword_spatial(all_amts, ["TOTALES", "TOTAL CONSUMO", "TOTAL:", "TOTALES:"])
-        voucher_total = find_amount_by_keyword_spatial(all_amts, ["TOTAL", "OTAL "])
-        if not voucher_sale:
-            voucher_sale = find_amount_by_keyword_spatial(all_amts, ["VENTA"])
+        restaurant_total = find_amount_by_keyword_spatial(
+            all_amts, ["TOTALES", "TOTAL CONSUMO", "TOTALES:"]
+        )
 
     payment_breakdown = extract_payment_breakdown_spatial(lines)
     cash_amount = payment_breakdown["cash_amount"]
@@ -746,14 +768,12 @@ def parse_ticket_spatial(raw_text: str, lines: list[list[dict]]) -> dict:
 
     payment_method = detect_payment_method(normalized, cash_amount, card_amount, card_network, card_last4)
 
-    if payment_method == "tarjeta":
-        importe = voucher_sale or card_amount or restaurant_total or voucher_total
-    elif payment_method == "efectivo":
-        importe = cash_amount or restaurant_total or voucher_total
-    elif payment_method == "mixto":
-        importe = restaurant_total or voucher_total or ((cash_amount or 0) + (card_amount or 0))
-    else:
-        importe = restaurant_total or voucher_sale or voucher_total
+    # ---- IMPORTE DECISION ----
+    # Rule: TOTALES from main ticket ALWAYS wins.
+    # Fallback: voucher_sale (Venta = consumo base).
+    # NEVER use voucher_total (includes propina).
+    # NEVER use card_amount or cash_amount as importe (they're partial payments).
+    importe = restaurant_total or voucher_sale
 
     # FALLBACK: if no importe via keywords, use the largest amount found
     if not importe:

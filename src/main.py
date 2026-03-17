@@ -218,7 +218,9 @@ def process_ticket_message(chat_id: str, reply_to_message_id: int | None, file_i
     payment_method = parsed.get("payment_method")
 
     if payment_method == "tarjeta":
-        card_base_amount = parsed.get("card_amount") or parsed.get("voucher_sale") or parsed.get("importe")
+        # RULE: importe is already correctly set from TOTALES/Venta in parser.
+        # card_amount is just the card portion — use importe as the consumption base.
+        card_base_amount = parsed.get("importe")
         write_payload = {**parsed, "importe": card_base_amount}
 
         if parsed.get("propina") not in (None, "", 0, 0.0):
@@ -280,7 +282,9 @@ def process_ticket_message(chat_id: str, reply_to_message_id: int | None, file_i
         return
 
     if payment_method == "efectivo":
-        cash_base_amount = parsed.get("cash_amount") or parsed.get("importe")
+        # RULE: importe is already correctly set from TOTALES/Venta in parser.
+        # cash_amount is just the cash portion — use importe as the consumption base.
+        cash_base_amount = parsed.get("importe")
         write_payload = {**parsed, "importe": cash_base_amount}
 
         if parsed.get("propina") not in (None, "", 0, 0.0):
