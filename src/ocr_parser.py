@@ -369,25 +369,49 @@ def extract_personas_spatial(lines: list[list[dict]]) -> int | None:
 
     return None
 
-def extract_mesero(text: str) -> str | None:
-    # Broader regex: allow digits and special chars that OCR may inject
+def extract_mesero_spatial(lines: list[list[dict]]) -> str | None:
+    """
+    Extracts the waiter name spatially. 
+    Looks for the label 'MESERO', 'ATENDIO', 'VENDEDOR', 'CAJERO'
+    and captures the text immediately to its right or below it.
+    """
+    labels = {"MESERO", "ATENDIO", "VENDEDOR", "CAJERO"}
+    
+    for i, l in enumerate(lines):
+        for j, w in enumerate(l):
+            w_text = w["search"]
+            if any(lbl in w_text for lbl in labels):
+                # Attempt 1: Words to the right on the same line
+                if j + 1 < len(l):
+                    candidate = " ".join([x["text"] for x in l[j+1:]])
+                    candidate = re.sub(r"[^A-ZÑa-zñ\s]", "", candidate).strip()
+                    candidate = re.sub(r"\b(HORA|FECHA|MESA|FOLIO)\b.*", "", candidate, flags=re.I).strip()
+                    if len(candidate) >= 2:
+                        return candidate.title()
+                
+                # Attempt 2: Vertically aligned on the next line
+                if i + 1 < len(lines):
+                    next_l = lines[i+1]
+                    candidate_words = [x["text"] for x in next_l if x["left"] >= w["left"] - 40]
+                    candidate = " ".join(candidate_words)
+                    candidate = re.sub(r"[^A-ZÑa-zñ\s]", "", candidate).strip()
+                    candidate = re.sub(r"\b(HORA|FECHA|MESA|FOLIO)\b.*", "", candidate, flags=re.I).strip()
+                    if len(candidate) >= 2:
+                        return candidate.title()
+    
+    # Fallback to heavily restricted global regex
+    full_text = "\n".join([" ".join([w["text"] for w in l]) for l in lines])
     patterns = [
-        r"\bMESERO\s*[:#-]?\s*([A-ZÑ0-9 .]{2,40})",
-        r"\bATENDIO\s*[:#-]?\s*([A-ZÑ0-9 .]{2,40})",
-        r"\bVENDEDOR\s*[:#-]?\s*([A-ZÑ0-9 .]{2,40})",
-        r"\bCAJERO\s*[:#-]?\s*([A-ZÑ0-9 .]{2,40})",
+        r"\b(?:MESERO|ATENDIO|VENDEDOR|CAJERO)\s*[:#-]?\s*([A-ZÑa-zñ ]{2,30})",
     ]
     for p in patterns:
-        m = re.search(p, text)
+        m = re.search(p, full_text, re.I)
         if m:
             candidate = m.group(1).strip()
-            candidate = re.sub(r"\s{2,}", " ", candidate)
-            # Take first word-chunk (before double-space or next label)
-            candidate = re.split(r"\s{2,}|\bHORA\b|\bCAJERO\b|\bFECHA\b", candidate)[0].strip()
-            # Strip trailing dots/digits that are pure noise
-            candidate = re.sub(r"[.0-9]+$", "", candidate).strip()
+            candidate = re.split(r"\s{2,}|\bHORA\b|\bFECHA\b|\bMESA\b|\bFOLIO\b", candidate, flags=re.I)[0].strip()
             if len(candidate) >= 2:
                 return candidate.title()
+                
     return None
 
 
@@ -510,17 +534,21 @@ def resolve_mesero_flexible(candidate: str | None, config: dict) -> tuple[str | 
     if not scores:
         return candidate, "mesero_no_match"
     
-    # Sort by combined score descending — ALWAYS pick the best
+    # Sort by combined score descending
     scores.sort(key=lambda x: x[0], reverse=True)
     best_combined, best_name, best_sm = scores[0]
     
-    # Confidence-based warning (informational only — never blocks)
+    # SAFETY THRESHOLD: Do not force a match if evidence is too weak
+    if best_combined < 0.35:
+        return candidate, f"mesero_rechazado({best_combined:.0%}_evidencia_pobre)"
+    
+    # Confidence-based warning
     if best_combined >= 0.55:
         warning = None  # high confidence
-    elif best_combined >= 0.35:
+    elif best_combined >= 0.40:
         warning = f"mesero_inferido({best_combined:.0%})"
     else:
-        warning = f"mesero_baja_evidencia({best_combined:.0%})"
+        warning = f"mesero_dudoso({best_combined:.0%})"
     
     return best_name, warning
 
@@ -905,7 +933,7 @@ def parse_ticket_spatial(raw_text: str, lines: list[list[dict]]) -> dict:
     ticket_date = extract_ticket_date(normalized)
     mesa = extract_mesa_spatial(lines)
     personas = extract_personas_spatial(lines)
-    mesero = extract_mesero(normalized)
+    mesero = extract_mesero_spatial(lines)
     voucher_operation = extract_voucher_operation(normalized)
 
     # ---- IMPORTE DECISION ----
