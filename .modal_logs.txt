@@ -1379,3 +1379,25 @@ ModuleNotFoundError: No module named 'src'
    POST / -> 200 OK  (duration: 1.03 s, execution: 375.0 ms)
 /root/src/main.py:640: DeprecationError: 2025-03-05: The `@modal.web_endpoint` decorator has been renamed to `@modal.fastapi_endpoint`.
   @modal.web_endpoint(method="POST")
+/root/src/main.py:640: DeprecationError: 2025-03-05: The `@modal.web_endpoint` decorator has been renamed to `@modal.fastapi_endpoint`.
+  @modal.web_endpoint(method="POST")
+[TIMING] download=1.27s  ocr=7.90s
+[TIMING] sheets_init=47.60s
+/root/src/main.py:640: DeprecationError: 2025-03-05: The `@modal.web_endpoint` decorator has been renamed to `@modal.fastapi_endpoint`.
+  @modal.web_endpoint(method="POST")
+Skipping duplicate update 996056219
+   POST / -> 200 OK  (duration: 4.47 s, execution: 113.1 ms)
+[TIMING] total=59.85s
+   POST / -> 200 OK  (duration: 3.05 s, execution: 2.97 s)
+[TIMING] download=0.99s  ocr=7.34s
+[TIMING] sheets_init=2.35s
+[TIMING] total=12.87s
+   POST / -> 200 OK  (duration: 13.8 s, execution: 13.6 s)
+   POST / -> 200 OK  (duration: 3.84 s, execution: 3.70 s)
+/root/src/main.py:640: DeprecationError: 2025-03-05: The `@modal.web_endpoint` decorator has been renamed to `@modal.fastapi_endpoint`.
+  @modal.web_endpoint(method="POST")
+[TIMING] download=0.77s  ocr=8.38s
+[TIMING] sheets_init=2.05s
+[TIMING] total=13.76s
+   POST / -> 200 OK  (duration: 18.0 s, execution: 14.3 s)
+   POST / -> 200 OK  (duration: 2.95 s, execution: 2.86 s)

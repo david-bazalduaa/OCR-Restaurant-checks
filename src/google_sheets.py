@@ -259,6 +259,20 @@ def next_free_row(ws: gspread.Worksheet, start_row: int, end_row: int, probe_col
     raise RuntimeError(f"No hay filas libres en {ws.title} para el rango {start_row}:{end_row}")
 
 
+def get_next_logical_no(ws: gspread.Worksheet, current_row: int, no_col: str) -> int:
+    """
+    Calcula el siguiente número lógico basándose enteramente en la celda anterior.
+    Evita fallos si 'start_row' en CONFIG apunta erróneamente a los encabezados.
+    """
+    if current_row <= 1:
+        return 1
+    
+    val = ws.get(f"{no_col}{current_row - 1}")
+    if val and val[0] and str(val[0][0]).strip().isdigit():
+        return int(str(val[0][0]).strip()) + 1
+    return 1
+
+
 def resolve_card_code_sheet(config: dict, network: str | None, card_type: str | None) -> str:
     if not network:
         return ""
@@ -285,7 +299,7 @@ def write_tip_side_table(day_ws: gspread.Worksheet, config: dict, tip_amount: fl
     end_row = parse_int(config.get("propina_tarjeta_end_row"), 22)
 
     row = next_free_row(day_ws, start_row, end_row, TIP_SIDE_COLS["propina"])
-    logical_no = row - start_row + 1
+    logical_no = get_next_logical_no(day_ws, row, TIP_SIDE_COLS["no"])
 
     day_ws.update(
         f"{TIP_SIDE_COLS['no']}{row}:{TIP_SIDE_COLS['propina']}{row}",
@@ -300,7 +314,7 @@ def write_tarjeta(day_ws: gspread.Worksheet, config: dict, payload: dict, respon
     end_row = parse_int(config.get("tarjeta_end_row"), 30)
 
     row = next_free_row(day_ws, start_row, end_row, CARD_COLS["importe"])
-    logical_no = row - start_row + 1
+    logical_no = get_next_logical_no(day_ws, row, CARD_COLS["no"])
 
     tip = payload.get("tip_in_card")
     card_label = payload.get("card_code_sheet") or payload.get("card_network") or ""
@@ -331,7 +345,7 @@ def write_efectivo(day_ws: gspread.Worksheet, config: dict, payload: dict, respo
     end_row = parse_int(config.get("efectivo_end_row"), 60)
 
     row = next_free_row(day_ws, start_row, end_row, CASH_COLS["importe"])
-    logical_no = row - start_row + 1
+    logical_no = get_next_logical_no(day_ws, row, CASH_COLS["no"])
 
     values = [[
         logical_no,
