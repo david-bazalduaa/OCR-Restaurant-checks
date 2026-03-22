@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import requests
 
-from .settings import settings
+from src.settings import settings
 
 
 BASE_BOT_URL = f"https://api.telegram.org/bot{settings.telegram_bot_token}"

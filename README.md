@@ -13,4 +13,4 @@ MVP:
    modal serve src/main.py
 
 ## Deploy
-modal deploy src/main.py
+modal deploy -m src.main

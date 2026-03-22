@@ -14,7 +14,7 @@ from googleapiclient.discovery import build
 from gspread.exceptions import WorksheetNotFound
 from gspread.utils import rowcol_to_a1
 
-from .settings import settings
+from src.settings import settings
 
 
 SCOPES = [
@@ -302,8 +302,7 @@ def write_tarjeta(day_ws: gspread.Worksheet, config: dict, payload: dict, respon
     row = next_free_row(day_ws, start_row, end_row, CARD_COLS["importe"])
     logical_no = row - start_row + 1
 
-    tip_in_card = payload.get("tip_in_card")
-    tip_in_cash = payload.get("tip_in_cash")
+    tip = payload.get("tip_in_card")
     card_label = payload.get("card_code_sheet") or payload.get("card_network") or ""
 
     values = [[
@@ -312,7 +311,7 @@ def write_tarjeta(day_ws: gspread.Worksheet, config: dict, payload: dict, respon
         safe_cell(payload.get("mesa")),
         safe_cell(payload.get("mesero")),
         format_money(payload.get("importe")),
-        format_money(tip_in_card) if tip_in_card not in (None, "") else "",
+        format_money(tip) if tip not in (None, "") else "",
         responsable,
         card_label,
         safe_cell(payload.get("card_last4")),
@@ -324,8 +323,8 @@ def write_tarjeta(day_ws: gspread.Worksheet, config: dict, payload: dict, respon
         value_input_option="USER_ENTERED",
     )
 
-    if tip_in_cash not in (None, "", 0, 0.0):
-        write_tip_side_table(day_ws, config, float(tip_in_cash))
+    if tip not in (None, "", 0, 0.0):
+        write_tip_side_table(day_ws, config, float(tip))
 
     return row, config.get("ingreso_tarjeta_table_name", "ingreso_tarjeta")
 
@@ -352,6 +351,9 @@ def write_efectivo(day_ws: gspread.Worksheet, config: dict, payload: dict, respo
         values,
         value_input_option="USER_ENTERED",
     )
+
+    if payload.get("tip_in_cash") not in (None, "", 0, 0.0):
+        write_tip_side_table(day_ws, config, float(payload["tip_in_cash"]))
 
     return row, config.get("ingreso_efectivo_table_name", "ingreso_efectivo")
 

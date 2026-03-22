@@ -11,7 +11,7 @@ import pytesseract
 from PIL import Image, ImageOps, ImageFilter
 from pytesseract import Output
 
-from .settings import settings
+from src.settings import settings
 
 CARD_WORDS = ["VISA", "MASTERCARD", "MASTER CARD", "AMEX", "AMERICAN EXPRESS"]
 

@@ -2,7 +2,7 @@ from pathlib import Path
 import pprint
 import sys
 
-from .ocr_parser import ocr_and_parse
+from src.ocr_parser import ocr_and_parse
 
 
 def main():
