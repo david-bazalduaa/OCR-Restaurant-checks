@@ -375,7 +375,7 @@ def extract_mesero_spatial(lines: list[list[dict]]) -> str | None:
     Looks for the label 'MESERO', 'ATENDIO', 'VENDEDOR', 'CAJERO'
     and captures the text immediately to its right or below it.
     """
-    labels = {"MESERO", "ATENDIO", "VENDEDOR", "CAJERO"}
+    labels = {"MESERO", "ATENDIO", "VENDEDOR"}
     
     for i, l in enumerate(lines):
         for j, w in enumerate(l):
@@ -402,7 +402,7 @@ def extract_mesero_spatial(lines: list[list[dict]]) -> str | None:
     # Fallback to heavily restricted global regex
     full_text = "\n".join([" ".join([w["text"] for w in l]) for l in lines])
     patterns = [
-        r"\b(?:MESERO|ATENDIO|VENDEDOR|CAJERO)\s*[:#-]?\s*([A-ZÑa-zñ ]{2,30})",
+        r"\b(?:MESERO|ATENDIO|VENDEDOR)\s*[:#-]?\s*([A-ZÑa-zñ ]{2,30})",
     ]
     for p in patterns:
         m = re.search(p, full_text, re.I)
@@ -483,7 +483,7 @@ def resolve_mesero_flexible(candidate: str | None, config: dict) -> tuple[str | 
     
     candidate_clean = re.sub(r"[^A-Z]", "", candidate.upper())
     if not candidate_clean:
-        return candidate, "mesero_no_alpha"
+        return None, "mesero_no_alpha"
     
     # --- Phase 1: Exact alias match (instant) ---
     for name in official_names:
@@ -532,7 +532,7 @@ def resolve_mesero_flexible(candidate: str | None, config: dict) -> tuple[str | 
         scores.append((combined, name, sm_ratio))
     
     if not scores:
-        return candidate, "mesero_no_match"
+        return None, "mesero_no_match"
     
     # Sort by combined score descending
     scores.sort(key=lambda x: x[0], reverse=True)
@@ -540,7 +540,7 @@ def resolve_mesero_flexible(candidate: str | None, config: dict) -> tuple[str | 
     
     # SAFETY THRESHOLD: Do not force a match if evidence is too weak
     if best_combined < 0.35:
-        return candidate, f"mesero_rechazado({best_combined:.0%}_evidencia_pobre)"
+        return None, f"mesero_rechazado({best_combined:.0%}_evidencia_pobre)"
     
     # Confidence-based warning
     if best_combined >= 0.55:

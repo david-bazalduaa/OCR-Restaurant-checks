@@ -1370,3 +1370,12 @@ ModuleNotFoundError: No module named 'src'
 /root/src/main.py:640: DeprecationError: 2025-03-05: The `@modal.web_endpoint` decorator has been renamed to `@modal.fastapi_endpoint`.
   @modal.web_endpoint(method="POST")
    POST / -> 200 OK  (duration: 7.13 s, execution: 3.07 s)
+/root/src/main.py:640: DeprecationError: 2025-03-05: The `@modal.web_endpoint` decorator has been renamed to `@modal.fastapi_endpoint`.
+  @modal.web_endpoint(method="POST")
+[TIMING] download=1.04s  ocr=6.35s
+[TIMING] sheets_init=1.74s
+[TIMING] total=11.77s
+   POST / -> 200 OK  (duration: 15.6 s, execution: 12.1 s)
+   POST / -> 200 OK  (duration: 1.03 s, execution: 375.0 ms)
+/root/src/main.py:640: DeprecationError: 2025-03-05: The `@modal.web_endpoint` decorator has been renamed to `@modal.fastapi_endpoint`.
+  @modal.web_endpoint(method="POST")

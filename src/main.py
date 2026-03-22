@@ -639,6 +639,17 @@ modal_secrets = [
 @app.function(image=image, timeout=120, secrets=modal_secrets)
 @modal.web_endpoint(method="POST")
 def telegram_webhook(update: dict):
+    update_id = str(update.get("update_id", ""))
+    if update_id:
+        try:
+            seen_dict = modal.Dict.from_name("ocr-bot-seen-updates", create_if_missing=True)
+            if seen_dict.contains(update_id):
+                print(f"Skipping duplicate update {update_id}")
+                return {"ok": True}
+            seen_dict[update_id] = True
+        except Exception as e:
+            print(f"Error reading seen_dict: {e}")
+
     try:
         message = update.get("message") or update.get("edited_message")
         if not message:
