@@ -217,129 +217,69 @@ def process_ticket_message(chat_id: str, reply_to_message_id: int | None, file_i
 
     payment_method = parsed.get("payment_method")
 
+    # Guardado diferido: No salvamos en las tablas principales durante esta fase si falta información.
     if payment_method == "tarjeta":
-        # RULE: importe is already correctly set from TOTALES/Venta in parser.
-        # card_amount is just the card portion — use importe as the consumption base.
-        card_base_amount = parsed.get("importe")
-        write_payload = {**parsed, "importe": card_base_amount}
-
-        if parsed.get("propina") not in (None, "", 0, 0.0):
-            write_payload["tip_in_card"] = float(parsed["propina"])
-            write_payload["tip_in_cash"] = None
-
-            target_row, target_table = write_tarjeta(ctx.day_ws, ctx.config, write_payload, responsable)
-
-            log_payload = build_log_payload(
-                parsed=write_payload,
-                responsable=responsable,
-                target_table=target_table,
-                target_row=target_row,
-                telegram_chat_id=chat_id,
-                telegram_file_id=file_id,
-                status="SAVED_CARD",
-                tip_in_card=float(parsed["propina"]),
-                tip_in_cash=None,
-                tip_mode_final="card",
-            )
-            append_log_record(ctx.log_ws, log_payload)
-
-            t6 = time.time()
-            print(f"[TIMING] total={t6-t0:.2f}s")
-            send_message(
-                chat_id,
-                "✅ Ticket registrado\n\n" + ticket_summary(write_payload),
-                reply_to_message_id,
-            )
-            return
-
-        write_payload["tip_in_card"] = None
-        write_payload["tip_in_cash"] = None
-        target_row, target_table = write_tarjeta(ctx.day_ws, ctx.config, write_payload, responsable)
-
+        propina_val = parsed.get("propina")
+        
+        # Guardamos en LOG como pendiente
         log_payload = build_log_payload(
-            parsed=write_payload,
+            parsed=parsed,
             responsable=responsable,
-            target_table=target_table,
-            target_row=target_row,
+            target_table="DEFERRED_CARD",
+            target_row=str(propina_val) if propina_val else "",
             telegram_chat_id=chat_id,
             telegram_file_id=file_id,
-            status="PENDING_TIP_CARD",
-            tip_in_card=None,
-            tip_in_cash=None,
-            tip_mode_final="",
+            status="PENDING_TIP_TARJETA_MODE",
         )
         append_log_record(ctx.log_ws, log_payload)
 
-        t6 = time.time()
-        print(f"[TIMING] total={t6-t0:.2f}s")
-        send_message(
-            chat_id,
-            "📋 Ticket registrado — falta propina\n\n"
-            f"{ticket_summary(write_payload)}\n\n"
-            "💬 Responde solo el monto de propina (ej: 80)",
-            reply_to_message_id,
-        )
+        msg = "💳 Detecté un pago con tarjeta.\n"
+        if propina_val:
+            msg += f"Propina sugerida: ${propina_val:,.2f}\n"
+        msg += "¿La propina fue en tarjeta o en efectivo?\n(Responde ej: 'tarjeta', 'efectivo', 'tarjeta 50')"
+            
+        send_message(chat_id, msg, reply_to_message_id)
         return
 
     if payment_method == "efectivo":
-        # RULE: importe is already correctly set from TOTALES/Venta in parser.
-        # cash_amount is just the cash portion — use importe as the consumption base.
-        cash_base_amount = parsed.get("importe")
-        write_payload = {**parsed, "importe": cash_base_amount}
-
-        if parsed.get("propina") not in (None, "", 0, 0.0):
-            write_payload["tip_in_cash"] = float(parsed["propina"])
-            target_row, target_table = write_efectivo(ctx.day_ws, ctx.config, write_payload, responsable)
-
+        importe = parsed.get("importe")
+        propina_val = parsed.get("propina")
+        
+        if not importe:
             log_payload = build_log_payload(
-                parsed=write_payload,
+                parsed=parsed,
                 responsable=responsable,
-                target_table=target_table,
-                target_row=target_row,
+                target_table="DEFERRED_CASH",
+                target_row=str(propina_val) if propina_val else "",
                 telegram_chat_id=chat_id,
                 telegram_file_id=file_id,
-                status="SAVED_CASH",
-                tip_in_card=None,
-                tip_in_cash=float(parsed["propina"]),
-                tip_mode_final="cash",
+                status="PENDING_CASH_AMOUNT",
             )
             append_log_record(ctx.log_ws, log_payload)
-
-            t6 = time.time()
-            print(f"[TIMING] total={t6-t0:.2f}s")
             send_message(
                 chat_id,
-                "✅ Ticket registrado\n\n" + ticket_summary(write_payload),
-                reply_to_message_id,
+                "💵 Detecté pago en efectivo, pero no pude leer el importe total consumido.\n¿Cuánto fue de efectivo total (sin propina)?\n(ej: '500')",
+                reply_to_message_id
             )
             return
-
-        write_payload["tip_in_cash"] = None
-        target_row, target_table = write_efectivo(ctx.day_ws, ctx.config, write_payload, responsable)
-
+            
+        # Si tenemos el importe, lo guardamos directo
+        write_payload = {**parsed, "importe": importe, "tip_in_cash": propina_val}
+        row, target_table = write_efectivo(ctx.day_ws, ctx.config, write_payload, responsable)
+        
         log_payload = build_log_payload(
             parsed=write_payload,
             responsable=responsable,
             target_table=target_table,
-            target_row=target_row,
+            target_row=row,
             telegram_chat_id=chat_id,
             telegram_file_id=file_id,
-            status="PENDING_TIP_EFECTIVO",
-            tip_in_card=None,
-            tip_in_cash=None,
-            tip_mode_final="",
+            status="SAVED_CASH",
+            tip_in_cash=propina_val,
+            tip_mode_final="cash"
         )
         append_log_record(ctx.log_ws, log_payload)
-
-        t6 = time.time()
-        print(f"[TIMING] total={t6-t0:.2f}s")
-        send_message(
-            chat_id,
-            "📋 Ticket registrado — falta propina\n\n"
-            f"{ticket_summary(write_payload)}\n\n"
-            "💬 Responde solo el monto de propina (ej: 50)",
-            reply_to_message_id,
-        )
+        send_message(chat_id, "✅ Ticket registrado en Efectivo\n\n" + ticket_summary(write_payload), reply_to_message_id)
         return
 
     if payment_method == "mixto":
@@ -355,65 +295,24 @@ def process_ticket_message(chat_id: str, reply_to_message_id: int | None, file_i
             )
             return
 
-        card_payload = {**parsed, "importe": card_amount, "tip_in_card": None}
-        cash_payload = {**parsed, "importe": cash_amount, "tip_in_cash": None}
-
-        if parsed.get("propina") not in (None, "", 0, 0.0):
-            card_payload["tip_in_card"] = float(parsed["propina"])
-
-        card_row, _ = write_tarjeta(ctx.day_ws, ctx.config, card_payload, responsable)
-        cash_row, _ = write_efectivo(ctx.day_ws, ctx.config, cash_payload, responsable)
-
-        if parsed.get("propina") not in (None, "", 0, 0.0):
-            log_payload = build_log_payload(
-                parsed=parsed,
-                responsable=responsable,
-                target_table="mixto",
-                target_row=f"{card_row}|{cash_row}",
-                telegram_chat_id=chat_id,
-                telegram_file_id=file_id,
-                status="SAVED_MIXED",
-                tip_in_card=float(parsed["propina"]),
-                tip_in_cash=None,
-                tip_mode_final="card",
-            )
-            append_log_record(ctx.log_ws, log_payload)
-
-            t6 = time.time()
-            print(f"[TIMING] total={t6-t0:.2f}s")
-            send_message(
-                chat_id,
-                "✅ Ticket mixto registrado\n\n" + ticket_summary(parsed),
-                reply_to_message_id,
-            )
-            return
-
+        propina_val = parsed.get("propina")
+        
         log_payload = build_log_payload(
             parsed=parsed,
             responsable=responsable,
-            target_table="mixto",
-            target_row=f"{card_row}|{cash_row}",
+            target_table="DEFERRED_MIXTO",
+            target_row=f"{propina_val or ''}|{card_amount}|{cash_amount}",
             telegram_chat_id=chat_id,
             telegram_file_id=file_id,
             status="PENDING_TIP_MIXTO",
-            tip_in_card=None,
-            tip_in_cash=None,
-            tip_mode_final="",
         )
         append_log_record(ctx.log_ws, log_payload)
-
-        t6 = time.time()
-        print(f"[TIMING] total={t6-t0:.2f}s")
-        send_message(
-            chat_id,
-            "📋 Ticket mixto registrado — falta propina\n\n"
-            f"{ticket_summary(parsed)}\n\n"
-            "💬 Responde así:\n"
-            "tarjeta 80\n"
-            "o\n"
-            "efectivo 80",
-            reply_to_message_id,
-        )
+        
+        msg = f"💳💵 Ticket mixto (Tarjeta: ${card_amount}, Efectivo: ${cash_amount}).\n"
+        if propina_val:
+            msg += f"Propina sugerida: ${propina_val:,.2f}\n"
+        msg += "¿La propina fue en tarjeta o en efectivo?\n(Responde ej: 'tarjeta', 'efectivo', 'tarjeta 50')"
+        send_message(chat_id, msg, reply_to_message_id)
         return
 
     send_message(
@@ -426,19 +325,7 @@ def process_ticket_message(chat_id: str, reply_to_message_id: int | None, file_i
 
 def process_tip_reply(chat_id: str, reply_to_message_id: int | None, text: str) -> None:
     parsed_tip = parse_tip_reply_message(text)
-    if parsed_tip is None:
-        send_message(
-            chat_id,
-            "💬 No entendí la propina.\n"
-            "Responde solo con el monto (ej: 50 o $50).\n"
-            "Si fue mixto: tarjeta 50 o efectivo 50",
-            reply_to_message_id,
-        )
-        return
-
-    tip_amount = float(parsed_tip["amount"])
-    requested_mode = parsed_tip["mode"]
-
+    
     today = date.fromisoformat(local_today_iso())
     ctx_today = get_runtime(today)
     pending = find_latest_pending_for_chat(ctx_today.log_ws, chat_id)
@@ -464,59 +351,170 @@ def process_tip_reply(chat_id: str, reply_to_message_id: int | None, text: str) 
         return
 
     pending_status = str(pending.get("status", "")).upper()
+    stored_target_row = str(pending.get("target_row", "")).strip()
 
-    if pending_status == "PENDING_TIP_CARD":
-        final_mode = "card"
-    elif pending_status == "PENDING_TIP_EFECTIVO":
-        final_mode = "cash"
-    elif pending_status == "PENDING_TIP_MIXTO":
-        final_mode = requested_mode
-        if final_mode not in {"card", "cash"}:
-            send_message(
-                chat_id,
-                "💬 Ese ticket fue mixto. Dime dónde fue la propina:\n"
-                "tarjeta 80 o efectivo 80",
-                reply_to_message_id,
-            )
+    # Reconstruct the base payload needed for saving
+    reconstructed = {
+        "payment_method": pending.get("payment_method"),
+        "mesa": pending.get("mesa"),
+        "mesero": pending.get("mesero"),
+        "personas": pending.get("personas"),
+        "importe": float(str(pending.get("importe") or "0").replace("$", "").replace(",", "") or 0),
+        "card_network": pending.get("card_network"),
+        "card_type": pending.get("card_type"),
+        "card_code_sheet": pending.get("card_code_sheet"),
+        "card_last4": pending.get("card_last4"),
+        "ticket_date": pending.get("ticket_date"),
+    }
+    responsable = pending.get("responsable", "")
+
+    if pending_status == "PENDING_CASH_AMOUNT":
+        if not parsed_tip or parsed_tip["amount"] is None:
+            send_message(chat_id, "💬 Por favor responde solo con el monto del efectivo (ej: 500).", reply_to_message_id)
             return
-    else:
-        send_message(
-            chat_id,
-            "Ese ticket ya no está pendiente de propina.",
-            reply_to_message_id,
-        )
+            
+        importe_val = parsed_tip["amount"]
+        reconstructed["importe"] = importe_val
+        
+        propina_val = None
+        if stored_target_row:
+            try: propina_val = float(stored_target_row)
+            except: pass
+            
+        reconstructed["tip_in_cash"] = propina_val
+        row, target_table = write_efectivo(ctx.day_ws, ctx.config, reconstructed, responsable)
+        
+        updates = {
+            "status": "SAVED_CASH",
+            "importe": round(float(importe_val), 2),
+            "total_cobrado": round(importe_val + (propina_val or 0.0), 2),
+            "target_table": target_table,
+            "target_row": row,
+        }
+        if propina_val:
+            updates["tip_in_cash"] = round(float(propina_val), 2)
+            updates["tip_mode_final"] = "cash"
+            
+        update_log_row(ctx.log_ws, int(pending["_row"]), updates)
+        send_message(chat_id, "✅ Efectivo registrado\n\n" + ticket_summary(reconstructed), reply_to_message_id)
         return
 
-    write_propina_tarjeta_efectivo(
-        ctx.day_ws,
-        ctx.config,
-        pending,
-        tip_amount,
-        tip_target_mode=final_mode,
-    )
-
-    importe = float(str(pending.get("importe") or "0").replace("$", "").replace(",", "") or 0)
-    new_status = {
-        "card": "COMPLETED_CARD_TIP",
-        "cash": "COMPLETED_CASH_TIP",
-    }[final_mode]
-
-    updates = {
-        "tip_mode_final": final_mode,
-        "total_cobrado": round(importe + tip_amount, 2),
-        "status": new_status,
-    }
-
-    if final_mode == "card":
-        updates["tip_in_card"] = round(tip_amount, 2)
+    # Handle CARD and MIXTO deferred tips
+    mode = None
+    if parsed_tip and parsed_tip["mode"]:
+        mode = parsed_tip["mode"]
     else:
-        updates["tip_in_cash"] = round(tip_amount, 2)
+        norm_text = normalize_text(text)
+        if "TARJETA" in norm_text or "CARD" in norm_text: mode = "card"
+        elif "EFECTIVO" in norm_text or "CASH" in norm_text: mode = "cash"
 
-    update_log_row(ctx.log_ws, int(pending["_row"]), updates)
+    tip_amount = None
+    if parsed_tip and parsed_tip["amount"] is not None:
+        tip_amount = parsed_tip["amount"]
+
+    if tip_amount == 0.0:
+        mode = mode or "card"  # arbitrary default if 0 tip
+
+    if not mode:
+        send_message(chat_id, "💬 Por favor indica si la propina fue 'en tarjeta' o 'en efectivo'.", reply_to_message_id)
+        return
+
+    if pending_status == "PENDING_TIP_TARJETA_MODE":
+        if tip_amount is None and stored_target_row:
+            try: tip_amount = float(stored_target_row)
+            except: pass
+            
+        if tip_amount is None:
+            send_message(chat_id, "💬 No detecté un monto de propina. Por favor incluye el monto (ej: 'tarjeta 50' o 'efectivo 50').", reply_to_message_id)
+            return
+
+        if mode == "card":
+            reconstructed["tip_in_card"] = tip_amount
+            reconstructed["tip_in_cash"] = None
+        else:
+            reconstructed["tip_in_card"] = None
+            reconstructed["tip_in_cash"] = tip_amount
+
+        row, target_table = write_tarjeta(ctx.day_ws, ctx.config, reconstructed, responsable)
+
+        importe_val = reconstructed["importe"]
+        updates = {
+            "status": "SAVED_CARD",
+            "target_table": target_table,
+            "target_row": row,
+            "tip_mode_final": mode,
+            "total_cobrado": round(importe_val + tip_amount, 2),
+        }
+        if mode == "card":
+            updates["tip_in_card"] = round(float(tip_amount), 2)
+        else:
+            updates["tip_in_cash"] = round(float(tip_amount), 2)
+            
+        update_log_row(ctx.log_ws, int(pending["_row"]), updates)
+        send_message(chat_id, "✅ Tarjeta registrada\n\n" + ticket_summary(reconstructed), reply_to_message_id)
+        return
+
+    if pending_status == "PENDING_TIP_MIXTO":
+        parts = stored_target_row.split("|")
+        stored_propina = parts[0] if len(parts) > 0 else ""
+        stored_card = parts[1] if len(parts) > 1 else "0"
+        stored_cash = parts[2] if len(parts) > 2 else "0"
+        
+        if tip_amount is None and stored_propina:
+            try: tip_amount = float(stored_propina)
+            except: pass
+            
+        if tip_amount is None:
+            send_message(chat_id, "💬 No detecté el monto. Por favor incluye el monto: 'tarjeta 50' o 'efectivo 50'.", reply_to_message_id)
+            return
+
+        try:
+            card_amount = float(stored_card)
+            cash_amount = float(stored_cash)
+        except:
+            card_amount = reconstructed["importe"] / 2
+            cash_amount = reconstructed["importe"] / 2
+
+        card_payload = {**reconstructed, "importe": card_amount, "tip_in_card": None, "tip_in_cash": None}
+        cash_payload = {**reconstructed, "importe": cash_amount, "tip_in_cash": None, "tip_in_card": None}
+
+        if mode == "card":
+            card_payload["tip_in_card"] = tip_amount
+        else:
+            cash_payload["tip_in_cash"] = tip_amount
+
+        card_row, _ = write_tarjeta(ctx.day_ws, ctx.config, card_payload, responsable)
+        cash_row, _ = write_efectivo(ctx.day_ws, ctx.config, cash_payload, responsable)
+
+        updates = {
+            "status": "SAVED_MIXED",
+            "target_table": "mixto",
+            "target_row": f"{card_row}|{cash_row}",
+            "tip_mode_final": mode,
+            "total_cobrado": round(card_amount + cash_amount + tip_amount, 2),
+        }
+        if mode == "card":
+            updates["tip_in_card"] = round(float(tip_amount), 2)
+        else:
+            updates["tip_in_cash"] = round(float(tip_amount), 2)
+            
+        update_log_row(ctx.log_ws, int(pending["_row"]), updates)
+        
+        # reconstruct for summary print
+        summary_payload = {**reconstructed, "card_amount": card_amount, "cash_amount": cash_amount, "payment_method": "mixto"}
+        if mode == "card":
+            summary_payload["tip_in_card"] = tip_amount
+            summary_payload["propina"] = tip_amount
+        else:
+            summary_payload["tip_in_cash"] = tip_amount
+            summary_payload["propina"] = tip_amount
+            
+        send_message(chat_id, "✅ Ticket mixto registrado\n\n" + ticket_summary(summary_payload), reply_to_message_id)
+        return
 
     send_message(
         chat_id,
-        f"✅ Propina registrada: ${tip_amount:,.2f}",
+        "Ese ticket ya no está pendiente de propina.",
         reply_to_message_id,
     )
 
