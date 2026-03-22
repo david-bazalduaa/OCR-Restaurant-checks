@@ -1342,3 +1342,12 @@ ModuleNotFoundError: No module named 'src'
    POST / -> 200 OK  (duration: 351.8 ms, execution: 259.2 ms)
    POST / -> 200 OK  (duration: 854.6 ms, execution: 562.2 ms)
    POST / -> 200 OK  (duration: 356.8 ms, execution: 269.7 ms)
+/root/src/main.py:581: DeprecationError: 2025-03-05: The `@modal.web_endpoint` decorator has been renamed to `@modal.fastapi_endpoint`.
+  @modal.web_endpoint(method="POST")
+   POST / -> 200 OK  (duration: 4.14 s, execution: 596.7 ms)
+[TIMING] download=1.06s  ocr=9.18s
+[TIMING] sheets_init=1.83s
+[TIMING] total=14.32s
+   POST / -> 200 OK  (duration: 14.7 s, execution: 14.6 s)
+   POST / -> 200 OK  (duration: 2.28 s, execution: 2.20 s)
+   POST / -> 200 OK  (duration: 1.68 s, execution: 1.60 s)

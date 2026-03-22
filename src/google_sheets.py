@@ -323,9 +323,6 @@ def write_tarjeta(day_ws: gspread.Worksheet, config: dict, payload: dict, respon
         value_input_option="USER_ENTERED",
     )
 
-    if tip not in (None, "", 0, 0.0):
-        write_tip_side_table(day_ws, config, float(tip))
-
     return row, config.get("ingreso_tarjeta_table_name", "ingreso_tarjeta")
 
 
@@ -352,9 +349,6 @@ def write_efectivo(day_ws: gspread.Worksheet, config: dict, payload: dict, respo
         value_input_option="USER_ENTERED",
     )
 
-    if payload.get("tip_in_cash") not in (None, "", 0, 0.0):
-        write_tip_side_table(day_ws, config, float(payload["tip_in_cash"]))
-
     return row, config.get("ingreso_efectivo_table_name", "ingreso_efectivo")
 
 
@@ -373,11 +367,22 @@ def write_propina_tarjeta_efectivo(
 
     if target_table == card_table:
         row = int(target_row_raw)
-        day_ws.update(
-            f"{CARD_COLS['propina']}{row}",
-            [[format_money(tip_amount)]],
-            value_input_option="USER_ENTERED",
-        )
+        if tip_target_mode == "card":
+            day_ws.update(
+                f"{CARD_COLS['propina']}{row}",
+                [[format_money(tip_amount)]],
+                value_input_option="USER_ENTERED",
+            )
+        elif tip_target_mode == "cash":
+            # Escenario 2: Propina de tarjeta en efectivo -> tabla lateral
+            write_tip_side_table(day_ws, config, tip_amount)
+        else:
+            # Fallback seguro
+            day_ws.update(
+                f"{CARD_COLS['propina']}{row}",
+                [[format_money(tip_amount)]],
+                value_input_option="USER_ENTERED",
+            )
 
     elif target_table == cash_table:
         row = int(target_row_raw)
@@ -412,8 +417,6 @@ def write_propina_tarjeta_efectivo(
 
     else:
         raise RuntimeError(f"No reconozco target_table={target_table}")
-
-    write_tip_side_table(day_ws, config, tip_amount)
 
 
 def build_log_payload(

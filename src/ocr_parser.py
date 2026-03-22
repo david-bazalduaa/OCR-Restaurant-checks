@@ -981,12 +981,17 @@ def parse_tip_reply_message(text: str) -> dict | None:
     elif "EFECTIVO" in normalized or "CASH" in normalized: mode = "cash"
 
     candidates = re.findall(r"\$?\s*\d[\d.,]{0,15}", normalized)
-    if not candidates: return None
+    amount = None
+    if candidates:
+        values = [parse_amount(x) for x in candidates]
+        values = [x for x in values if x is not None]
+        if values:
+            amount = values[0]
 
-    values = [parse_amount(x) for x in candidates]
-    values = [x for x in values if x is not None]
-    if not values: return None
-    return {"amount": values[0], "mode": mode}
+    if mode is None and amount is None:
+        return None
+
+    return {"amount": amount, "mode": mode}
 
 def local_today_iso() -> str:
     now = datetime.now(ZoneInfo(settings.timezone))

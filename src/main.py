@@ -218,43 +218,13 @@ def process_ticket_message(chat_id: str, reply_to_message_id: int | None, file_i
     payment_method = parsed.get("payment_method")
 
     if payment_method == "tarjeta":
-        # RULE: importe is already correctly set from TOTALES/Venta in parser.
-        # card_amount is just the card portion — use importe as the consumption base.
         card_base_amount = parsed.get("importe")
-        write_payload = {**parsed, "importe": card_base_amount}
+        write_payload = {**parsed, "importe": card_base_amount, "tip_in_card": None, "tip_in_cash": None}
 
-        if parsed.get("propina") not in (None, "", 0, 0.0):
-            write_payload["tip_in_card"] = float(parsed["propina"])
-            write_payload["tip_in_cash"] = None
-
-            target_row, target_table = write_tarjeta(ctx.day_ws, ctx.config, write_payload, responsable)
-
-            log_payload = build_log_payload(
-                parsed=write_payload,
-                responsable=responsable,
-                target_table=target_table,
-                target_row=target_row,
-                telegram_chat_id=chat_id,
-                telegram_file_id=file_id,
-                status="SAVED_CARD",
-                tip_in_card=float(parsed["propina"]),
-                tip_in_cash=None,
-                tip_mode_final="card",
-            )
-            append_log_record(ctx.log_ws, log_payload)
-
-            t6 = time.time()
-            print(f"[TIMING] total={t6-t0:.2f}s")
-            send_message(
-                chat_id,
-                "✅ Ticket registrado\n\n" + ticket_summary(write_payload),
-                reply_to_message_id,
-            )
-            return
-
-        write_payload["tip_in_card"] = None
-        write_payload["tip_in_cash"] = None
+        # Siempre preguntamos si la propina fue en tarjeta o en efectivo (Escenario 1 vs Escenario 2)
         target_row, target_table = write_tarjeta(ctx.day_ws, ctx.config, write_payload, responsable)
+
+        propina_ocr = parsed.get("propina")
 
         log_payload = build_log_payload(
             parsed=write_payload,
@@ -263,27 +233,51 @@ def process_ticket_message(chat_id: str, reply_to_message_id: int | None, file_i
             target_row=target_row,
             telegram_chat_id=chat_id,
             telegram_file_id=file_id,
-            status="PENDING_TIP_CARD",
-            tip_in_card=None,
+            status="PENDING_TIP_CARD_TYPE",
+            tip_in_card=propina_ocr,  # Guardamos temporalmente el valor del OCR
             tip_in_cash=None,
             tip_mode_final="",
         )
-        append_log_record(ctx.log_ws, log_payload)
+        log_row = append_log_record(ctx.log_ws, log_payload)
+
+        try:
+            pending_dict = modal.Dict.from_name("ocr-bot-pending-tips", create_if_missing=True)
+            pending_dict[chat_id] = {
+                "ticket_date": parsed["ticket_date"],
+                "target_table": target_table,
+                "target_row": target_row,
+                "_row": log_row,
+                "status": "PENDING_TIP_CARD_TYPE",
+                "importe": card_base_amount,
+                "tip_in_card": propina_ocr
+            }
+        except Exception as e:
+            print("Error parsing state to Modal Dict:", e)
+
+        if propina_ocr not in (None, "", 0, 0.0):
+            msg = (
+                f"📋 Detecté un pago con tarjeta.\n"
+                f"El monto de propina detectado es de {fmt_money(propina_ocr)}.\n\n"
+                f"¿La propina fue en tarjeta o en efectivo?\n"
+                f"(Responde 'tarjeta' o 'efectivo', o con monto ej: 'efectivo 50')"
+            )
+        else:
+            msg = (
+                f"📋 Detecté un pago con tarjeta.\n\n"
+                f"¿La propina fue en tarjeta o en efectivo y de cuánto fue?\n"
+                f"(Ej: 'tarjeta 50' o 'efectivo 50')"
+            )
 
         t6 = time.time()
         print(f"[TIMING] total={t6-t0:.2f}s")
         send_message(
             chat_id,
-            "📋 Ticket registrado — falta propina\n\n"
-            f"{ticket_summary(write_payload)}\n\n"
-            "💬 Responde solo el monto de propina (ej: 80)",
+            msg,
             reply_to_message_id,
         )
         return
 
     if payment_method == "efectivo":
-        # RULE: importe is already correctly set from TOTALES/Venta in parser.
-        # cash_amount is just the cash portion — use importe as the consumption base.
         cash_base_amount = parsed.get("importe")
         write_payload = {**parsed, "importe": cash_base_amount}
 
@@ -309,7 +303,7 @@ def process_ticket_message(chat_id: str, reply_to_message_id: int | None, file_i
             print(f"[TIMING] total={t6-t0:.2f}s")
             send_message(
                 chat_id,
-                "✅ Ticket registrado\n\n" + ticket_summary(write_payload),
+                "✅ Ticket registrado en Efectivo\n\n" + ticket_summary(write_payload),
                 reply_to_message_id,
             )
             return
@@ -329,15 +323,29 @@ def process_ticket_message(chat_id: str, reply_to_message_id: int | None, file_i
             tip_in_cash=None,
             tip_mode_final="",
         )
-        append_log_record(ctx.log_ws, log_payload)
+        log_row = append_log_record(ctx.log_ws, log_payload)
+
+        try:
+            pending_dict = modal.Dict.from_name("ocr-bot-pending-tips", create_if_missing=True)
+            pending_dict[chat_id] = {
+                "ticket_date": parsed["ticket_date"],
+                "target_table": target_table,
+                "target_row": target_row,
+                "_row": log_row,
+                "status": "PENDING_TIP_EFECTIVO",
+                "importe": cash_base_amount,
+                "tip_in_cash": None
+            }
+        except Exception as e:
+            print("Error parsing state to Modal Dict:", e)
 
         t6 = time.time()
         print(f"[TIMING] total={t6-t0:.2f}s")
         send_message(
             chat_id,
-            "📋 Ticket registrado — falta propina\n\n"
-            f"{ticket_summary(write_payload)}\n\n"
-            "💬 Responde solo el monto de propina (ej: 50)",
+            "📋 Detecté pago en efectivo.\n\n"
+            f"{ticket_summary(write_payload)}\n"
+            "💬 ¿Cuánto fue de efectivo (propina)? (Ej: 50)",
             reply_to_message_id,
         )
         return
@@ -400,7 +408,20 @@ def process_ticket_message(chat_id: str, reply_to_message_id: int | None, file_i
             tip_in_cash=None,
             tip_mode_final="",
         )
-        append_log_record(ctx.log_ws, log_payload)
+        log_row = append_log_record(ctx.log_ws, log_payload)
+
+        try:
+            pending_dict = modal.Dict.from_name("ocr-bot-pending-tips", create_if_missing=True)
+            pending_dict[chat_id] = {
+                "ticket_date": parsed["ticket_date"],
+                "target_table": "mixto",
+                "target_row": f"{card_row}|{cash_row}",
+                "_row": log_row,
+                "status": "PENDING_TIP_MIXTO",
+                "importe": card_amount,
+            }
+        except Exception as e:
+            print("Error parsing state to Modal Dict:", e)
 
         t6 = time.time()
         print(f"[TIMING] total={t6-t0:.2f}s")
@@ -429,24 +450,27 @@ def process_tip_reply(chat_id: str, reply_to_message_id: int | None, text: str) 
     if parsed_tip is None:
         send_message(
             chat_id,
-            "💬 No entendí la propina.\n"
-            "Responde solo con el monto (ej: 50 o $50).\n"
-            "Si fue mixto: tarjeta 50 o efectivo 50",
+            "💬 No entendí el mensaje.\n"
+            "Si es tarjeta: 'tarjeta 50' o 'efectivo 50'.\n"
+            "Si es solo monto: '50'.",
             reply_to_message_id,
         )
         return
 
-    tip_amount = float(parsed_tip["amount"])
-    requested_mode = parsed_tip["mode"]
+    tip_amount_raw = parsed_tip.get("amount")
+    requested_mode = parsed_tip.get("mode")
 
-    today = date.fromisoformat(local_today_iso())
-    ctx_today = get_runtime(today)
-    pending = find_latest_pending_for_chat(ctx_today.log_ws, chat_id)
+    try:
+        pending_dict = modal.Dict.from_name("ocr-bot-pending-tips", create_if_missing=True)
+        pending = pending_dict.get(chat_id)
+    except Exception as e:
+        print("Error reading Modal Dict:", e)
+        pending = None
 
     if not pending:
         send_message(
             chat_id,
-            "No encontré un ticket pendiente de propina en este mes.",
+            "💬 No encontré una operación pendiente asociada a tu chat.\nEs posible que ya se haya cerrado o guardado.",
             reply_to_message_id,
         )
         return
@@ -454,21 +478,48 @@ def process_tip_reply(chat_id: str, reply_to_message_id: int | None, text: str) 
     pending_ticket_date = date.fromisoformat(pending["ticket_date"])
     ctx = get_runtime(pending_ticket_date)
 
-    pending = find_latest_pending_for_chat(ctx.log_ws, chat_id)
-    if not pending:
-        send_message(
-            chat_id,
-            "Encontré el ticket, pero no pude recuperar el pendiente en el archivo del mes.",
-            reply_to_message_id,
-        )
-        return
-
     pending_status = str(pending.get("status", "")).upper()
 
-    if pending_status == "PENDING_TIP_CARD":
-        final_mode = "card"
+    final_amount = tip_amount_raw
+    final_mode = None
+
+    if pending_status == "PENDING_TIP_CARD_TYPE":
+        final_mode = requested_mode
+        if not final_mode:
+            send_message(
+                chat_id,
+                "💬 Por favor especifica si la propina fue en 'tarjeta' o en 'efectivo'.",
+                reply_to_message_id,
+            )
+            return
+
+        if final_amount is None:
+            # Try to grab OCR tip stored temporarily in tip_in_card
+            ocr_tip_raw = pending.get("tip_in_card") or ""
+            ocr_tip_str = str(ocr_tip_raw).replace("$", "").replace(",", "").strip()
+            try:
+                final_amount = float(ocr_tip_str) if ocr_tip_str else None
+            except Exception:
+                final_amount = None
+
+            if final_amount is None or final_amount <= 0:
+                send_message(
+                    chat_id,
+                    "💬 No encontré el monto de la propina.\nResponde con el monto y tipo de propina (ej: 'tarjeta 50' o 'efectivo 50').",
+                    reply_to_message_id,
+                )
+                return
+
     elif pending_status == "PENDING_TIP_EFECTIVO":
+        if final_amount is None:
+            send_message(
+                chat_id,
+                "💬 Necesito el monto numérico. (ej: 50)",
+                reply_to_message_id,
+            )
+            return
         final_mode = "cash"
+
     elif pending_status == "PENDING_TIP_MIXTO":
         final_mode = requested_mode
         if final_mode not in {"card", "cash"}:
@@ -479,6 +530,13 @@ def process_tip_reply(chat_id: str, reply_to_message_id: int | None, text: str) 
                 reply_to_message_id,
             )
             return
+        if final_amount is None:
+             send_message(
+                chat_id,
+                "💬 Necesito el monto numérico para el ticket mixto. (ej: tarjeta 80)",
+                reply_to_message_id,
+            )
+             return
     else:
         send_message(
             chat_id,
@@ -491,7 +549,7 @@ def process_tip_reply(chat_id: str, reply_to_message_id: int | None, text: str) 
         ctx.day_ws,
         ctx.config,
         pending,
-        tip_amount,
+        final_amount,
         tip_target_mode=final_mode,
     )
 
@@ -503,20 +561,28 @@ def process_tip_reply(chat_id: str, reply_to_message_id: int | None, text: str) 
 
     updates = {
         "tip_mode_final": final_mode,
-        "total_cobrado": round(importe + tip_amount, 2),
+        "total_cobrado": round(importe + final_amount, 2),
         "status": new_status,
     }
 
     if final_mode == "card":
-        updates["tip_in_card"] = round(tip_amount, 2)
+        updates["tip_in_card"] = round(final_amount, 2)
     else:
-        updates["tip_in_cash"] = round(tip_amount, 2)
+        updates["tip_in_cash"] = round(final_amount, 2)
 
     update_log_row(ctx.log_ws, int(pending["_row"]), updates)
 
+    try:
+        pending_dict = modal.Dict.from_name("ocr-bot-pending-tips", create_if_missing=True)
+        # Limpieza correcta del estado pendiente
+        if chat_id in pending_dict:
+            pending_dict.pop(chat_id)
+    except Exception as e:
+        print("Error clearing Modal Dict:", e)
+
     send_message(
         chat_id,
-        f"✅ Propina registrada: ${tip_amount:,.2f}",
+        f"✅ Propina registrada: ${final_amount:,.2f} en {final_mode}",
         reply_to_message_id,
     )
 
