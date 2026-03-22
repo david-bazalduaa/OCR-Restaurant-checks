@@ -867,13 +867,14 @@ def parse_ticket_spatial(raw_text: str, lines: list[list[dict]]) -> dict:
 
     # Step 1: Find TOTALES from the main ticket (strict label match)
     restaurant_total = find_amount_by_keyword_spatial(
-        main_amounts, ["TOTALES", "TOTAL CONSUMO", "TOTALES:"]
+        main_amounts, ["TOTALES", "TOTAL CONSUMO", "TOTALES:", "TDTALES", "T0TALES", "TOTALFS", "TOTALES "]
     )
     
     # Step 2: Find Venta from voucher (consumo base)
-    voucher_sale = find_amount_by_keyword_spatial(main_amounts, ["VENTA"])
+    # PRIORIDAD: Buscar en voucher (derecha) para evitar atrapar "Módulo de Venta" en el ticket izquierdo
+    voucher_sale = find_amount_by_keyword_spatial(right_amounts, ["VENTA", "VCNTA", "VENT"])
     if not voucher_sale:
-        voucher_sale = find_amount_by_keyword_spatial(right_amounts, ["VENTA"])
+        voucher_sale = find_amount_by_keyword_spatial(main_amounts, ["VENTA", "VCNTA", "VENT"])
     
     # Step 3: Find voucher Total (ONLY for metadata, never for importe)
     voucher_total = find_amount_by_keyword_spatial(right_amounts, ["TOTAL"])

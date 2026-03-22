@@ -249,7 +249,8 @@ def process_ticket_message(chat_id: str, reply_to_message_id: int | None, file_i
                 "_row": log_row,
                 "status": "PENDING_TIP_CARD_TYPE",
                 "importe": card_base_amount,
-                "tip_in_card": propina_ocr
+                "tip_in_card": propina_ocr,
+                "parsed": parsed
             }
         except Exception as e:
             print("Error parsing state to Modal Dict:", e)
@@ -334,7 +335,8 @@ def process_ticket_message(chat_id: str, reply_to_message_id: int | None, file_i
                 "_row": log_row,
                 "status": "PENDING_TIP_EFECTIVO",
                 "importe": cash_base_amount,
-                "tip_in_cash": None
+                "tip_in_cash": None,
+                "parsed": parsed
             }
         except Exception as e:
             print("Error parsing state to Modal Dict:", e)
@@ -419,6 +421,7 @@ def process_ticket_message(chat_id: str, reply_to_message_id: int | None, file_i
                 "_row": log_row,
                 "status": "PENDING_TIP_MIXTO",
                 "importe": card_amount,
+                "parsed": parsed
             }
         except Exception as e:
             print("Error parsing state to Modal Dict:", e)
@@ -585,6 +588,19 @@ def process_tip_reply(chat_id: str, reply_to_message_id: int | None, text: str) 
         f"✅ Propina registrada: ${final_amount:,.2f} en {final_mode}",
         reply_to_message_id,
     )
+    
+    # Extraer variables para el resumen final conversacional
+    past_parsed = pending.get("parsed", {})
+    if past_parsed:
+        if final_mode == "cash": past_parsed["tip_in_cash"] = final_amount
+        if final_mode == "card": past_parsed["tip_in_card"] = final_amount
+        past_parsed["propina"] = final_amount
+        
+        send_message(
+            chat_id,
+            "📝 Resumen de la Operación Cerrada:\n\n" + ticket_summary(past_parsed),
+            reply_to_message_id,
+        )
 
 
 def build_failed_log_payload(chat_id: str, file_id: str, parsed: dict | None = None) -> dict:
