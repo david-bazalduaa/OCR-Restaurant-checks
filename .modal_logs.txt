@@ -1401,3 +1401,10 @@ Skipping duplicate update 996056219
 [TIMING] total=13.76s
    POST / -> 200 OK  (duration: 18.0 s, execution: 14.3 s)
    POST / -> 200 OK  (duration: 2.95 s, execution: 2.86 s)
+/root/src/main.py:640: DeprecationError: 2025-03-05: The `@modal.web_endpoint` decorator has been renamed to `@modal.fastapi_endpoint`.
+  @modal.web_endpoint(method="POST")
+[TIMING] download=0.04s  ocr=26.80s
+[TIMING] sheets_init=4.64s
+[TIMING] total=37.20s
+   POST / -> 200 OK  (duration: 42.5 s, execution: 37.9 s)
+   POST / -> 200 OK  (duration: 6.81 s, execution: 6.62 s)
