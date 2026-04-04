@@ -470,9 +470,6 @@ def resolve_mesero_flexible(candidate: str | None, config: dict) -> tuple[str | 
     Uses multi-metric scoring: aliases, containment, LCS, char overlap,
     edit distance, SequenceMatcher.
     """
-    if not candidate:
-        return None, None
-    
     valid_waiters_str = config.get("valid_waiters", "")
     if not valid_waiters_str:
         return candidate, None  # no validation list configured
@@ -480,10 +477,13 @@ def resolve_mesero_flexible(candidate: str | None, config: dict) -> tuple[str | 
     official_names = [n.strip() for n in valid_waiters_str.split("|") if n.strip()]
     if not official_names:
         return candidate, None
+        
+    if not candidate:
+        return official_names[0], "mesero_por_defecto(sin_lectura)"
     
     candidate_clean = re.sub(r"[^A-Z]", "", candidate.upper())
     if not candidate_clean:
-        return None, "mesero_no_alpha"
+        return official_names[0], "mesero_por_defecto(sin_letras)"
     
     # --- Phase 1: Exact alias match (instant) ---
     for name in official_names:
@@ -532,23 +532,19 @@ def resolve_mesero_flexible(candidate: str | None, config: dict) -> tuple[str | 
         scores.append((combined, name, sm_ratio))
     
     if not scores:
-        return None, "mesero_no_match"
+        return official_names[0], "mesero_por_defecto(sin_match)"
     
     # Sort by combined score descending
     scores.sort(key=lambda x: x[0], reverse=True)
     best_combined, best_name, best_sm = scores[0]
     
-    # SAFETY THRESHOLD: Do not force a match if evidence is too weak
-    if best_combined < 0.35:
-        return None, f"mesero_rechazado({best_combined:.0%}_evidencia_pobre)"
-    
-    # Confidence-based warning
+    # Confidence-based warning (Siempre devuelve el mejor match)
     if best_combined >= 0.55:
         warning = None  # high confidence
     elif best_combined >= 0.40:
         warning = f"mesero_inferido({best_combined:.0%})"
     else:
-        warning = f"mesero_dudoso({best_combined:.0%})"
+        warning = f"mesero_forzado({best_combined:.0%}_evidencia_baja)"
     
     return best_name, warning
 
