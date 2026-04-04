@@ -274,24 +274,22 @@ def get_next_logical_no(ws: gspread.Worksheet, current_row: int, no_col: str) ->
 
 
 def resolve_card_code_sheet(config: dict, network: str | None, card_type: str | None) -> str:
-    if not network:
-        return ""
-
-    network = network.lower()
+    network = (network or "").lower()
     card_type = (card_type or "").lower()
 
-    if network == "visa" and card_type == "credito":
-        return config.get("visa_credito_code", "CV")
-    if network == "visa" and card_type == "debito":
-        return config.get("visa_debito_code", "DV")
-    if network == "mastercard" and card_type == "credito":
-        return config.get("mastercard_credito_code", "CMC")
-    if network == "mastercard" and card_type == "debito":
-        return config.get("mastercard_debito_code", "DMC")
     if network == "amex":
         return config.get("amex_code", "AMEX")
-
-    return network.upper()
+        
+    if network == "mastercard":
+        if card_type == "debito":
+            return config.get("mastercard_debito_code", "DMC")
+        return config.get("mastercard_credito_code", "CMC")
+        
+    # Por defecto, fuerza a que sea VISA para que siempre caiga en las opciones permitidas
+    if card_type == "debito":
+        return config.get("visa_debito_code", "DV")
+        
+    return config.get("visa_credito_code", "CV")
 
 
 def write_tip_side_table(day_ws: gspread.Worksheet, config: dict, tip_amount: float) -> int:
@@ -317,7 +315,7 @@ def write_tarjeta(day_ws: gspread.Worksheet, config: dict, payload: dict, respon
     logical_no = get_next_logical_no(day_ws, row, CARD_COLS["no"])
 
     tip = payload.get("tip_in_card")
-    card_label = payload.get("card_code_sheet") or payload.get("card_network") or ""
+    card_label = payload.get("card_code_sheet") or config.get("visa_credito_code", "CV")
 
     values = [[
         logical_no,
